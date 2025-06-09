@@ -1,0 +1,9 @@
+fownload the 4 zip files from the url:  https://www.kaggle.com/datasets/markunys/livecell-dataset/data
+the 4 files are:    1. LIVECell_dataset_2021.zip
+                    2. livecell_annotations_train.json.zip
+                    3. livecell_annotations_val.json.zip
+                    4. livecell_annotations_test.json.zip
+
+move the files to designated dir.
+Then edit the dirs pathes `extract_data.py`, all the edit that need to be done is in the main.
+then run the script `extract_data.py`
