@@ -6,6 +6,11 @@ __pycache__/
 # C extensions
 *.so
 
+#
+livecell_dataset/*
+my_scripts/*
+results/*
+
 # Distribution / packaging
 .Python
 build/
