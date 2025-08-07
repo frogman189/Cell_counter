@@ -1,4 +1,6 @@
 import torch
+from torch.optim.lr_scheduler import LambdaLR
+import math
 from torch.utils.data import DataLoader
 from torchvision.models.detection import maskrcnn_resnet50_fpn
 import torchvision
@@ -6,12 +8,12 @@ import os
 from preprocess import prepare_dataset, LiveCellDataset
 import numpy as np
 from torchvision.models.detection import MaskRCNN_ResNet50_FPN_Weights
-from typing import Dict, Any, List, Tuple, Optional
 import time
 
 from utils.logger_utils import setup_logging
-from utils.constants import TIME, model_args, train_cfg, dataset_paths, SAVE_MODEL
+from utils.constants import TIME, model_args, train_cfg, dataset_paths, SAVE_MODEL, DEVICE, RUN_EXP
 from models import get_model, save_model
+from utils.metrics import count_predictions, calculate_counting_metrics, plot_training_results
 
 
 
@@ -43,7 +45,13 @@ from models import get_model, save_model
 #     plt.close()
 
 
-
+def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(0.0, 0.5 * (1. + math.cos(math.pi * progress)))  # Cosine decay
+    return LambdaLR(optimizer, lr_lambda)
 
 
 def collate_fn(batch):
@@ -53,47 +61,29 @@ def collate_fn(batch):
     return images, list(targets)
 
 
-def count_predictions(prediction: Dict, confidence_threshold: float = 0.5):
-    """Count predicted objects above confidence threshold"""
-    if 'scores' in prediction and len(prediction['scores']) > 0:
-        valid_predictions = prediction['scores'] >= confidence_threshold
-        return valid_predictions.sum().item()
-    return 0
-    
-def calculate_counting_metrics(predictions: List[int], ground_truths: List[int], thresholds: List[int]):
-    """Calculate MSE and threshold-based accuracy metrics"""
-    predictions = np.array(predictions)
-    ground_truths = np.array(ground_truths)
-    
-    # MSE
-    mse = np.mean((predictions - ground_truths) ** 2)
-    
-    # MAE (Mean Absolute Error)
-    mae = np.mean(np.abs(predictions - ground_truths))
-    
-    # Threshold-based accuracies
-    metrics = {
-        'mse': mse,
-        'mae': mae,
-        'mean_pred': np.mean(predictions),
-        'mean_gt': np.mean(ground_truths)
-    }
-    
-    for threshold in thresholds:
-        correct_predictions = np.abs(predictions - ground_truths) <= threshold
-        accuracy = np.mean(correct_predictions) * 100  # Convert to percentage
-        metrics[f'acc_thresh_{threshold}'] = accuracy
-    
-    return metrics
+def train_cfg_for_optuna(trial, train_cfg):
+    lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)  # log=True, will use log scale to interplolate between lr
+    # alpha = trial.suggest_float("alpha", 0.68, 0.90, step=0.01)
+    # gamma = trial.suggest_float("gamma", 1.1, 1.9, step=0.01)
+    #lambbda = trial.suggest_float("lambbda", 0.4, 1, step=0.01)
+    batch_size = trial.suggest_categorical("batch_size", [16, 32, 64])
+
+    train_cfg['learning_rate'] = lr
+    # train_cfg['alpha'] = alpha
+    # train_cfg['gamma'] = gamma
+    #train_cfg['lambbda'] = lambbda
+    # train_cfg['num_epochs']= 8
+    train_cfg['batch_size'] = batch_size
+    return train_cfg
 
 
-def train_epoch(model, optimizer, train_loader, device):
+def train_epoch(model, optimizer, scheduler, train_loader, device, batch_size=16, accumulation_steps = 4):
     """Train for one epoch"""
     model.train()
     total_loss = 0.0
     num_batches = 0
     
-    for images, targets in train_loader:
+    for i, (images, targets) in enumerate(train_loader):
         images = images.to(device)
         targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()} for target in targets]
         
@@ -107,16 +97,29 @@ def train_epoch(model, optimizer, train_loader, device):
             loss = sum(losses.values())
         else:
             loss = losses
+        # loss = loss / accumulation_steps
+
+        # loss.backward()
+
+        # if (i + 1) % accumulation_steps == 0:
+        #     optimizer.step()
+        #     optimizer.zero_grad()
         
         # Backward pass
         loss.backward()
         optimizer.step()
+        scheduler.step()
         
         total_loss += loss.item()
         num_batches += 1
         
-        print(f"Batch Loss: {loss.item():.4f}")
-        print(f"Memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        #print(f"Batch Loss: {loss.item():.4f}")
+        #print(f"Memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+    
+    # Handle remaining gradients (if total batches % accumulation_steps != 0)
+    # if (i + 1) % accumulation_steps != 0:
+    #     optimizer.step()
+    #     optimizer.zero_grad()
     
     return total_loss / num_batches if num_batches > 0 else 0.0
 
@@ -172,12 +175,27 @@ def validate_epoch(model, val_loader, device):
     return metrics
 
 
-def train(model, train_dataset, val_dataset, train_cfg, optimizer, scheduler, device):
+def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=False, trial=None):
 
-    train_loader = DataLoader(train_dataset, batch_size=train_cfg['batch_size'], shuffle=True, collate_fn=collate_fn, pin_memory=True if device == 'cuda' else False) # num_workers=train_cfg['num_workers']
-    val_loader = DataLoader(val_dataset, batch_size=train_cfg['batch_size'], shuffle=False, collate_fn=collate_fn, pin_memory=True if device == 'cuda' else False) # num_workers=train_cfg['num_workers'], 
+    if optuna:
+        train_cfg = train_cfg_for_optuna(trial, train_cfg)
 
-    logger, log_file_path, output_dir = setup_logging(train_cfg, TIME, model_args, optuna=False, run_exp=True)
+    train_loader = DataLoader(train_dataset, batch_size=train_cfg['batch_size'], shuffle=True, collate_fn=collate_fn, num_workers=train_cfg['num_workers'], pin_memory=True if device == 'cuda' else False) # num_workers=train_cfg['num_workers']
+    val_loader = DataLoader(val_dataset, batch_size=train_cfg['batch_size'], shuffle=False, collate_fn=collate_fn, num_workers=train_cfg['num_workers'], pin_memory=True if device == 'cuda' else False) # num_workers=train_cfg['num_workers'], 
+
+    if train_cfg['optimizer_name'] == 'SGD':
+        optimizer = torch.optim.SGD(model.parameters(), lr=train_cfg['learning_rate'])
+    elif train_cfg['optimizer_name'] == 'Adam':
+        optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg['learning_rate'])
+    elif train_cfg['optimizer_name'] == 'RAdam':
+        optimizer = torch.optim.RAdam(model.parameters(), lr=train_cfg['learning_rate'])
+
+    total_training_steps = len(train_loader) * train_cfg['num_epochs']
+    warmup_steps = int(0.1 * total_training_steps)  # 10% warm-up
+
+    scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_training_steps)
+
+    logger, log_file_path, output_dir = setup_logging(train_cfg, TIME, model_args, optuna=optuna, run_exp=RUN_EXP)
 
     since = time.time()
     epochs = train_cfg['num_epochs']
@@ -187,13 +205,14 @@ def train(model, train_dataset, val_dataset, train_cfg, optimizer, scheduler, de
     best_val_loss = float('inf')
     best_val_accuracy = 0.0
     best_checkpoint = {}
+    best_val_metrics = {}
 
     for epoch in range(epochs):
         start_epoch = time.time()
         logger.warning('Epoch {}/{}'.format(epoch+1, epochs))
         logger.warning('-' * 10)
 
-        train_loss = train_epoch(model, optimizer, train_loader, device)
+        train_loss = train_epoch(model, optimizer, scheduler, train_loader, device)
         train_losses.append(train_loss)
 
         val_metrics = validate_epoch(model, val_loader, device)
@@ -201,7 +220,7 @@ def train(model, train_dataset, val_dataset, train_cfg, optimizer, scheduler, de
         val_losses.append(val_loss)
         val_metrics_history.append(val_metrics)
         
-        scheduler.step()
+        
 
         lr = optimizer.param_groups[0]['lr']
         logger.warning(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {lr:.6f}")
@@ -214,8 +233,9 @@ def train(model, train_dataset, val_dataset, train_cfg, optimizer, scheduler, de
                 acc = val_metrics[f'acc_thresh_{thresh}']
                 logger.warning(f"  Accuracy @ threshold {thresh}: {acc:.1f}%")
 
-        if val_metrics[f'acc_thresh_0'] < best_val_accuracy:
-            best_val_accuracy = val_metrics[f'acc_thresh_0']
+        if val_metrics[f'acc_thresh_3'] < best_val_accuracy:
+            best_val_accuracy = val_metrics[f'acc_thresh_3']
+            best_val_metrics = val_metrics
             # Save checkpoint
             best_checkpoint = {
                 'epoch': epoch + 1,
@@ -228,14 +248,29 @@ def train(model, train_dataset, val_dataset, train_cfg, optimizer, scheduler, de
 
         logger.warning('Epoch complete in {:.0f}h {:.0f}m {:.0f}s'.format((time.time() - start_epoch) // 3600, ((time.time() - start_epoch) % 3600) // 60, (time.time() - start_epoch) % 60))
 
-    if SAVE_MODEL:
+    if SAVE_MODEL and not optuna and not RUN_EXP:
         save_model(best_checkpoint, output_dir)
 
     time_elapsed = time.time() - since
     logger.warning('Training complete in {:.0f}h {:.0f}m {:.0f}s'.format(time_elapsed // 3600, (time_elapsed % 3600) // 60, time_elapsed % 60))
+
+    logger.warning("------  The best Statistics  ------")
+    logger.warning(f"  Mean GT: {best_val_metrics['mean_gt']:.1f}, Mean Pred: {best_val_metrics['mean_pred']:.1f}")
+    for thresh in [0, 1, 3, 5, 10, 20]:
+        acc = best_val_metrics[f'acc_thresh_{thresh}']
+        logger.warning(f"  Accuracy @ threshold {thresh}: {acc:.1f}%")
+
+    if not optuna and not RUN_EXP:
+        plot_training_results(train_losses, val_losses, val_metrics_history, output_dir)
+
+    if optuna:
+        print("------  The best Statistics  ------")
+        print(f"  Mean GT: {best_val_metrics['mean_gt']:.1f}, Mean Pred: {best_val_metrics['mean_pred']:.1f}")
+        for thresh in [0, 1, 3, 5, 10, 20]:
+            acc = best_val_metrics[f'acc_thresh_{thresh}']
+            print(f"  Accuracy @ threshold {thresh}: {acc:.1f}%")
         
-
-
+        return best_val_accuracy
 
 
 def main():
@@ -247,21 +282,10 @@ def main():
     train_dataset = LiveCellDataset(dataset_dict['train'])
     val_dataset = LiveCellDataset(dataset_dict['val'])
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model()
-    model.to(device)
+    model.to(DEVICE)
 
-    if train_cfg['optimizer_name'] == 'SGD':
-        optimizer = torch.optim.SGD(model.parameters(), lr=train_cfg['learning_rate'])
-    elif train_cfg['optimizer_name'] == 'Adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg['learning_rate'])
-    elif train_cfg['optimizer_name'] == 'RAdam':
-        optimizer = torch.optim.RAdam(model.parameters(), lr=train_cfg['learning_rate'])
-
-    #optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.95)
-
-    train(model, train_dataset, val_dataset, train_cfg, optimizer, scheduler, device)
+    train(model, train_dataset, val_dataset, train_cfg, DEVICE)
 
 if __name__ == "__main__":
     main()

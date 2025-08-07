@@ -1,11 +1,17 @@
-import numpy as np
-from torchvision.models.detection import MaskRCNN_ResNet50_FPN_Weights
-from torchvision.models.detection import maskrcnn_resnet50_fpn
 import torchvision
-from utils.constants import MODEL_NAME, TIME
 import os
 import torch
+from torch import nn
 import json
+
+from utils.constants import MODEL_NAME, TIME
+from torchvision.models.detection import MaskRCNN_ResNet50_FPN_Weights, maskrcnn_resnet50_fpn
+from torchvision.models.segmentation import deeplabv3_resnet50
+from ultralytics import YOLO
+#from detectron2 import model_zoo
+#from detectron2.config import get_cfg
+#from detectron2.modeling import build_model
+
 
 def set_parameter_requires_grad(model, feature_extracting=True):
     # approach 1
@@ -15,6 +21,7 @@ def set_parameter_requires_grad(model, feature_extracting=True):
     else:
         # fine-tuning
         model.requires_grad_(True)
+
 
 def calculate_trainable(model):
     param_size = 0
@@ -31,7 +38,7 @@ def calculate_trainable(model):
 
 
 
-def get_ResNet50_model(num_classes):
+def load_maskrcnn_ResNet50_model(num_classes):
     # Load a pre-trained Mask R-CNN and adapt for custom classes
     weights = MaskRCNN_ResNet50_FPN_Weights.COCO_V1  # or DEFAULT
     model = maskrcnn_resnet50_fpn(weights=weights)
@@ -44,10 +51,59 @@ def get_ResNet50_model(num_classes):
 
     return model
 
+def load_unet_model(num_classes=2, pretrained=True):
+    # Load a U-Net-like model (using DeepLabV3+ as an example)
+    weights = "DEFAULT" if pretrained else None
+    model = deeplabv3_resnet50(weights=weights, num_classes=num_classes)
+    
+    # Replace classifier for binary segmentation (cell vs. background)
+    model.classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
+    
+    # Optional: Freeze backbone for fine-tuning
+    if pretrained:
+        for param in model.backbone.parameters():
+            param.requires_grad = False
+    
+    return model
+
+
+#Fine tune Yolo guide: https://docs.ultralytics.com/tasks/segment/ - maybe aviad can take this personly, can teach alot.
+#Important: expected input size: (B, 3, 640, 640)
+def load_yolov8_seg_model(num_classes=1, model_size="yolov8s-seg.pt"):
+    # Load pre-trained YOLOv8 segmentation model
+    model = YOLO(model_size)  # 'yolov8n-seg.pt', 'yolov8s-seg.pt', etc.
+    
+    # Update class count (1 class: "cell")
+    model.model.nc = num_classes
+    
+    # Optional: Freeze backbone (YOLOv8-specific)
+    for name, param in model.model.named_parameters():
+        if 'backbone' in name:
+            param.requires_grad = False
+    
+    return model
+
+# Intro to detctron2 - https://detectron2.readthedocs.io/en/latest/
+# def load_detectron2(model_name="mask_rcnn_R_50_FPN_3x.yaml", num_classes=1):
+#     cfg = get_cfg()
+#     cfg.merge_from_file(model_zoo.get_config_file(f"COCO-InstanceSegmentation/{model_name}"))
+#     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(f"COCO-InstanceSegmentation/{model_name}")
+#     cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes  # 1 class (cell)
+    
+#     # Freeze backbone (optional)
+#     cfg.MODEL.BACKBONE.FREEZE_AT = 2
+    
+#     model = build_model(cfg)
+#     return model, cfg
+
 
 def get_model():
-    if MODEL_NAME == "ResNet50":
-        model = get_ResNet50_model(num_classes=2)
+    if MODEL_NAME == "Mask_R_CNN_ResNet50":
+        model = load_maskrcnn_ResNet50_model(num_classes=2)
+    elif MODEL_NAME == "Unet":
+        model = load_unet_model(num_classes=2)
+    elif MODEL_NAME == "YOLOv8":
+        model = load_yolov8_seg_model(num_classes=1)
 
     set_parameter_requires_grad(model, feature_extracting=False)
     calculate_trainable(model)
