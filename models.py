@@ -7,7 +7,10 @@ import json
 from utils.constants import MODEL_NAME, TIME
 from torchvision.models.detection import MaskRCNN_ResNet50_FPN_Weights, maskrcnn_resnet50_fpn
 from torchvision.models.segmentation import deeplabv3_resnet50
+from torchvision.models.segmentation import DeepLabV3_ResNet50_Weights
+from segmentation_models_pytorch import Unet
 from ultralytics import YOLO
+from instanseg import InstanSeg
 #from detectron2 import model_zoo
 #from detectron2.config import get_cfg
 #from detectron2.modeling import build_model
@@ -52,20 +55,21 @@ def load_maskrcnn_ResNet50_model(num_classes):
     return model
 
 def load_unet_model(num_classes=2, pretrained=True):
-    # Load a U-Net-like model (using DeepLabV3+ as an example)
-    weights = "DEFAULT" if pretrained else None
-    model = deeplabv3_resnet50(weights=weights, num_classes=num_classes)
-    
-    # Replace classifier for binary segmentation (cell vs. background)
+    if pretrained:
+        weights = DeepLabV3_ResNet50_Weights.DEFAULT
+        model = deeplabv3_resnet50(weights=weights)
+    else:
+        model = deeplabv3_resnet50(weights=None)
+
+    # Replace the classifier head
     model.classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
-    
+
     # Optional: Freeze backbone for fine-tuning
     if pretrained:
         for param in model.backbone.parameters():
             param.requires_grad = False
-    
-    return model
 
+    return model
 
 #Fine tune Yolo guide: https://docs.ultralytics.com/tasks/segment/ - maybe aviad can take this personly, can teach alot.
 #Important: expected input size: (B, 3, 640, 640)

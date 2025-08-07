@@ -10,6 +10,7 @@ __pycache__/
 livecell_dataset/*
 my_scripts/*
 results/*
+environment.yaml
 
 # Distribution / packaging
 .Python

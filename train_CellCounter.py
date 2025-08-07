@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 import math
 from torch.utils.data import DataLoader
@@ -45,6 +46,15 @@ from utils.metrics import count_predictions, calculate_counting_metrics, plot_tr
 #     plt.close()
 
 
+class CountMSELoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred_counts, true_counts):
+        return nn.functional.mse_loss(pred_counts.float(), true_counts.float())
+
+        
+
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
     def lr_lambda(current_step):
         if current_step < num_warmup_steps:
@@ -63,16 +73,9 @@ def collate_fn(batch):
 
 def train_cfg_for_optuna(trial, train_cfg):
     lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)  # log=True, will use log scale to interplolate between lr
-    # alpha = trial.suggest_float("alpha", 0.68, 0.90, step=0.01)
-    # gamma = trial.suggest_float("gamma", 1.1, 1.9, step=0.01)
-    #lambbda = trial.suggest_float("lambbda", 0.4, 1, step=0.01)
     batch_size = trial.suggest_categorical("batch_size", [16, 32, 64])
 
     train_cfg['learning_rate'] = lr
-    # train_cfg['alpha'] = alpha
-    # train_cfg['gamma'] = gamma
-    #train_cfg['lambbda'] = lambbda
-    # train_cfg['num_epochs']= 8
     train_cfg['batch_size'] = batch_size
     return train_cfg
 
