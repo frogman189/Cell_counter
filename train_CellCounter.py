@@ -64,12 +64,16 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
     return LambdaLR(optimizer, lr_lambda)
 
 
-def collate_fn(batch):
-    """Custom collate function for handling variable-sized targets"""
-    images, targets = zip(*batch)
-    images = torch.stack(images, 0)
-    return images, list(targets)
+# def collate_fn(batch):
+#     """Custom collate function for handling variable-sized targets"""
+#     images, targets = zip(*batch)
+#     images = torch.stack(images, 0)
+#     return images, list(targets)
 
+def collate_fn(batch):
+    # batch is a list of (image_tensor, target_dict)
+    images, targets = zip(*batch)        # tuples of len=batch_size
+    return list(images), list(targets)   # lists; do NOT stack
 
 def train_cfg_for_optuna(trial, train_cfg):
     lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)  # log=True, will use log scale to interplolate between lr
@@ -87,8 +91,8 @@ def train_epoch(model, optimizer, scheduler, train_loader, device, batch_size=16
     num_batches = 0
     
     for i, (images, targets) in enumerate(train_loader):
-        images = images.to(device)
-        targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()} for target in targets]
+        images  = [img.to(device) for img in images]  # list of tensors
+        targets = [{k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()} for t in targets]
         
         optimizer.zero_grad()
         
@@ -140,23 +144,26 @@ def validate_epoch(model, val_loader, device):
     
     with torch.no_grad():
         for images, targets in val_loader:
-            images = images.to(device)
-            targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()} for target in targets]
+            images_list  = [img.to(device) for img in images]
+            targets_list = [{k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()} for t in targets]
             
             # Calculate loss (need train mode for Mask R-CNN)
             model.train()
-            losses = model(images, targets)
+            with torch.no_grad():
+                losses = model(images_list, targets_list)
+                #loss = sum(loss_dict.values())
+                #total_loss += loss.item()
+            
+            
+                if isinstance(losses, dict):
+                    loss = sum(losses.values())
+                else:
+                    loss = losses
+            
+                total_loss += loss.item()
             model.eval()
-            
-            if isinstance(losses, dict):
-                loss = sum(losses.values())
-            else:
-                loss = losses
-            
-            total_loss += loss.item()
-            
             # Get predictions for counting
-            predictions = model(images, None)
+            predictions = model(images_list, None)
             
             # Count objects in predictions and ground truth
             for i, (pred, target) in enumerate(zip(predictions, targets)):
@@ -166,8 +173,8 @@ def validate_epoch(model, val_loader, device):
                 # Predicted count (filter by confidence score)
                 pred_count = count_predictions(pred, confidence_threshold=0.5)
                 
-                all_predictions.append(pred_count)
-                all_ground_truths.append(gt_count)
+                all_predictions.append(int(pred_count))
+                all_ground_truths.append(int(gt_count))
             
             num_batches += 1
     

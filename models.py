@@ -41,34 +41,46 @@ def calculate_trainable(model):
 
 
 
-def load_maskrcnn_ResNet50_model(num_classes):
-    # Load a pre-trained Mask R-CNN and adapt for custom classes
-    weights = MaskRCNN_ResNet50_FPN_Weights.COCO_V1  # or DEFAULT
-    model = maskrcnn_resnet50_fpn(weights=weights)
+# def load_maskrcnn_ResNet50_model(num_classes):
+#     # Load a pre-trained Mask R-CNN and adapt for custom classes
+#     weights = MaskRCNN_ResNet50_FPN_Weights.COCO_V1  # or DEFAULT
+#     model = maskrcnn_resnet50_fpn(weights=weights)
+#     in_features = model.roi_heads.box_predictor.cls_score.in_features
+#     model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(in_features, num_classes)
+
+#     in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
+#     hidden_layer = 256
+#     model.roi_heads.mask_predictor = torchvision.models.detection.mask_rcnn.MaskRCNNPredictor(in_features_mask, hidden_layer, num_classes)
+
+#     return model
+
+from torchvision.models.detection import maskrcnn_resnet50_fpn_v2, MaskRCNN_ResNet50_FPN_V2_Weights
+from torchvision.models.detection.rpn import AnchorGenerator
+import torchvision
+
+def load_maskrcnn_ResNet50_model(num_classes: int):
+    weights = MaskRCNN_ResNet50_FPN_V2_Weights.COCO_V1
+    model = maskrcnn_resnet50_fpn_v2(weights=weights)
+
+    # --- set smaller anchors post-hoc (5 FPN levels expected) ---
+    # Try smaller sizes for small cells; adjust if needed
+    anchor_generator = AnchorGenerator(
+        sizes=((8,), (16,), (32,), (64,), (128,)),          # one size per FPN level
+        aspect_ratios=((0.5, 1.0, 2.0),) * 5               # replicate per level
+    )
+    model.rpn.anchor_generator = anchor_generator
+
+    # Replace heads for your num_classes (incl. background)
     in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(in_features, num_classes)
+    model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(
+        in_features, num_classes
+    )
 
     in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
     hidden_layer = 256
-    model.roi_heads.mask_predictor = torchvision.models.detection.mask_rcnn.MaskRCNNPredictor(in_features_mask, hidden_layer, num_classes)
-
-    return model
-
-def load_unet_model(num_classes=2, pretrained=True):
-    if pretrained:
-        weights = DeepLabV3_ResNet50_Weights.DEFAULT
-        model = deeplabv3_resnet50(weights=weights)
-    else:
-        model = deeplabv3_resnet50(weights=None)
-
-    # Replace the classifier head
-    model.classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
-
-    # Optional: Freeze backbone for fine-tuning
-    if pretrained:
-        for param in model.backbone.parameters():
-            param.requires_grad = False
-
+    model.roi_heads.mask_predictor = torchvision.models.detection.mask_rcnn.MaskRCNNPredictor(
+        in_features_mask, hidden_layer, num_classes
+    )
     return model
 
 #Fine tune Yolo guide: https://docs.ultralytics.com/tasks/segment/ - maybe aviad can take this personly, can teach alot.

@@ -17,7 +17,7 @@ DEVICE = torch.device(f'cuda:{best_gpu}' if torch.cuda.is_available() else 'cpu'
 
 # Set model to run
 MODELS = ['Mask_R_CNN_ResNet50', 'Unet', 'YOLOv8']
-MODEL_NAME = 'Unet'
+MODEL_NAME = 'Mask_R_CNN_ResNet50'
 assert MODEL_NAME in MODELS
 
 model_args = {
@@ -35,10 +35,10 @@ OUTPUT_OPTUNA_DIR = os.path.join(PROJECT_ROOT, f'optuna_trials/{MODEL_NAME}')
 
 # Set training confugurations
 train_cfg = {
-    'batch_size': 16,
+    'batch_size': 2,
     'num_workers': 8,
     'num_epochs': 40,
-    'learning_rate': 1e-3,
+    'learning_rate': 4e-3,
     'optimizer_name': OPTIMIZER_NAME,
     'result_dir': RESULT_DIR
 }
