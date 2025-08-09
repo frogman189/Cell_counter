@@ -2,6 +2,7 @@ import torchvision
 import os
 import torch
 from torch import nn
+import torch.nn.functional as F
 import json
 
 from utils.constants import MODEL_NAME, TIME
@@ -14,7 +15,9 @@ from instanseg import InstanSeg
 #from detectron2 import model_zoo
 #from detectron2.config import get_cfg
 #from detectron2.modeling import build_model
-
+from torchvision.models.detection import maskrcnn_resnet50_fpn_v2, MaskRCNN_ResNet50_FPN_V2_Weights
+from torchvision.models.detection.rpn import AnchorGenerator
+import torchvision
 
 def set_parameter_requires_grad(model, feature_extracting=True):
     # approach 1
@@ -41,33 +44,81 @@ def calculate_trainable(model):
 
 
 
-def load_maskrcnn_ResNet50_model(num_classes):
-    # Load a pre-trained Mask R-CNN and adapt for custom classes
-    weights = MaskRCNN_ResNet50_FPN_Weights.COCO_V1  # or DEFAULT
-    model = maskrcnn_resnet50_fpn(weights=weights)
+# def load_maskrcnn_ResNet50_model(num_classes):
+#     # Load a pre-trained Mask R-CNN and adapt for custom classes
+#     weights = MaskRCNN_ResNet50_FPN_Weights.COCO_V1  # or DEFAULT
+#     model = maskrcnn_resnet50_fpn(weights=weights)
+#     in_features = model.roi_heads.box_predictor.cls_score.in_features
+#     model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(in_features, num_classes)
+
+#     in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
+#     hidden_layer = 256
+#     model.roi_heads.mask_predictor = torchvision.models.detection.mask_rcnn.MaskRCNNPredictor(in_features_mask, hidden_layer, num_classes)
+
+#     return model
+def load_maskrcnn_resnet50_fpn_v2_for_cells(num_classes: int):
+    weights = MaskRCNN_ResNet50_FPN_V2_Weights.COCO_V1
+    # Smaller anchors help nuclei/cell scales; tune sizes to your pixel scale
+    anchor_generator = AnchorGenerator(
+        sizes=((16, 32, 64, 128),),           # try (8,16,32,64) if cells are tiny
+        aspect_ratios=((0.5, 1.0, 2.0),)
+    )
+
+    model = maskrcnn_resnet50_fpn_v2(
+        weights=weights,
+        rpn_anchor_generator=anchor_generator,
+        box_score_thresh=0.05,               # keep low during training; raise at eval
+        trainable_backbone_layers=3          # 3–5; more layers = more finetuning, more compute
+    )
+
+    # Replace heads for your num_classes (incl. background)
     in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(in_features, num_classes)
+    model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(
+        in_features, num_classes
+    )
 
     in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
     hidden_layer = 256
-    model.roi_heads.mask_predictor = torchvision.models.detection.mask_rcnn.MaskRCNNPredictor(in_features_mask, hidden_layer, num_classes)
-
+    model.roi_heads.mask_predictor = torchvision.models.detection.mask_rcnn.MaskRCNNPredictor(
+        in_features_mask, hidden_layer, num_classes
+    )
     return model
 
-def load_unet_model(num_classes=2, pretrained=True):
-    if pretrained:
-        weights = DeepLabV3_ResNet50_Weights.DEFAULT
-        model = deeplabv3_resnet50(weights=weights)
-    else:
-        model = deeplabv3_resnet50(weights=None)
+# def load_unet_model(num_classes=2, pretrained=True):
+#     if pretrained:
+#         weights = DeepLabV3_ResNet50_Weights.DEFAULT
+#         model = deeplabv3_resnet50(weights=weights)
+#     else:
+#         model = deeplabv3_resnet50(weights=None)
 
-    # Replace the classifier head
-    model.classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
+#     # Replace the classifier head
+#     model.classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
 
-    # Optional: Freeze backbone for fine-tuning
-    if pretrained:
-        for param in model.backbone.parameters():
-            param.requires_grad = False
+#     # Optional: Freeze backbone for fine-tuning
+#     if pretrained:
+#         for param in model.backbone.parameters():
+#             param.requires_grad = False
+
+#     return model
+
+def load_unet_model(num_classes: int = 2,
+               in_channels: int = 3,
+               encoder_name: str = "resnet34",
+               encoder_weights: str = "imagenet"):
+    model = Unet(
+        encoder_name=encoder_name,
+        encoder_weights=encoder_weights,
+        in_channels=in_channels,
+        classes=num_classes,
+        activation=None,  # return logits
+    )
+
+    # Safety: if you ever need to 'replace the last layer' explicitly:
+    # (Not strictly necessary because classes=num_classes already sets it.)
+    head = getattr(model, "segmentation_head", None)
+    if isinstance(head, nn.Sequential) and isinstance(head[0], nn.Conv2d):
+        in_ch = head[0].in_channels
+        head[0] = nn.Conv2d(in_ch, num_classes, kernel_size=1, bias=True)
 
     return model
 

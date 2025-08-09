@@ -212,26 +212,94 @@ class LiveCellDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
+    # def __getitem__(self, idx):
+    #     entry = self.data[idx]
+    #     image = np.array(Image.open(entry['filename']).convert("RGB"))
+    #     annotations = entry['annotations']
+
+    #     def empty_target():
+    #         return {
+    #             "boxes": torch.zeros((0, 4), dtype=torch.float32),
+    #             "labels": torch.zeros((0,), dtype=torch.int64),
+    #             "masks": torch.zeros((0, 512, 512), dtype=torch.uint8),
+    #             "image_id": torch.tensor([idx]),
+    #             "area": torch.zeros((0,), dtype=torch.float32),
+    #             "iscrowd": torch.zeros((0,), dtype=torch.int64),
+    #         }
+
+    #     if not annotations:
+    #         transformed = self.transforms(image=image)
+    #         return transformed['image'], empty_target()
+
+    #     masks, labels, areas, iscrowd = [], [], [], []
+    #     for ann in annotations:
+    #         rle = maskUtils.frPyObjects(ann['segmentation'], entry['height'], entry['width'])
+    #         mask = maskUtils.decode(rle)
+    #         if mask.ndim == 3:
+    #             mask = np.any(mask, axis=2).astype(np.uint8)
+    #         if mask.sum() == 0:
+    #             continue
+    #         masks.append(mask)
+    #         labels.append(1)  # Class 1 = cell
+    #         areas.append(ann.get('area', float(mask.sum())))
+    #         iscrowd.append(ann.get('iscrowd', 0))
+
+    #     if not masks:
+    #         transformed = self.transforms(image=image)
+    #         return transformed['image'], empty_target()
+
+    #     # Apply transforms to image AND masks together
+    #     transformed = self.transforms(image=image, masks=masks)
+    #     image_tensor = transformed['image']
+    #     masks_tensor = torch.stack([torch.as_tensor(m, dtype=torch.uint8) for m in transformed['masks']])
+
+    #     # Calculate boxes (post-resize)
+    #     boxes = []
+    #     valid_indices = []
+    #     for i, mask in enumerate(masks_tensor):
+    #         pos = (mask == 1).nonzero()
+    #         if len(pos) == 0:
+    #             continue
+    #         xmin, ymin = pos.min(dim=0)[0][1], pos.min(dim=0)[0][0]
+    #         xmax, ymax = pos.max(dim=0)[0][1], pos.max(dim=0)[0][0]
+    #         if xmax <= xmin or ymax <= ymin:
+    #             continue
+    #         boxes.append(torch.tensor([xmin, ymin, xmax, ymax], dtype=torch.float32))
+    #         valid_indices.append(i)
+
+    #     if not boxes:
+    #         return image_tensor, empty_target()
+
+    #     # Filter valid masks/labels
+    #     masks_tensor = masks_tensor[valid_indices]
+    #     labels = [labels[i] for i in valid_indices]
+    #     areas = [areas[i] for i in valid_indices]
+    #     iscrowd = [iscrowd[i] for i in valid_indices]
+
+    #     target = {
+    #         "boxes": torch.stack(boxes),
+    #         "labels": torch.tensor(labels, dtype=torch.int64),
+    #         "masks": masks_tensor,
+    #         "image_id": torch.tensor([idx]),
+    #         "area": torch.tensor(areas, dtype=torch.float32),
+    #         "iscrowd": torch.tensor(iscrowd, dtype=torch.int64),
+    #     }
+
+    #     return image_tensor, target, entry['cell_count']
+
     def __getitem__(self, idx):
         entry = self.data[idx]
         image = np.array(Image.open(entry['filename']).convert("RGB"))
         annotations = entry['annotations']
 
-        def empty_target():
-            return {
-                "boxes": torch.zeros((0, 4), dtype=torch.float32),
-                "labels": torch.zeros((0,), dtype=torch.int64),
-                "masks": torch.zeros((0, 512, 512), dtype=torch.uint8),
-                "image_id": torch.tensor([idx]),
-                "area": torch.zeros((0,), dtype=torch.float32),
-                "iscrowd": torch.zeros((0,), dtype=torch.int64),
-            }
-
+        # === CHANGED: handle "no annotations" -> return zero mask tensor ===
         if not annotations:
             transformed = self.transforms(image=image)
-            return transformed['image'], empty_target()
+            image_tensor = transformed['image']
+            mask_tensor = torch.zeros((512, 512), dtype=torch.long)   # (H,W), class indices {0,1}
+            return image_tensor, mask_tensor, entry['cell_count']
 
-        masks, labels, areas, iscrowd = [], [], [], []
+        masks = []
         for ann in annotations:
             rle = maskUtils.frPyObjects(ann['segmentation'], entry['height'], entry['width'])
             mask = maskUtils.decode(rle)
@@ -240,52 +308,23 @@ class LiveCellDataset(Dataset):
             if mask.sum() == 0:
                 continue
             masks.append(mask)
-            labels.append(1)  # Class 1 = cell
-            areas.append(ann.get('area', float(mask.sum())))
-            iscrowd.append(ann.get('iscrowd', 0))
 
+        # === CHANGED: if after filtering there are no valid masks -> zero mask ===
         if not masks:
             transformed = self.transforms(image=image)
-            return transformed['image'], empty_target()
+            image_tensor = transformed['image']
+            mask_tensor = torch.zeros((512, 512), dtype=torch.long)
+            return image_tensor, mask_tensor, entry['cell_count']
 
-        # Apply transforms to image AND masks together
+        # === CHANGED: apply transforms jointly and then UNION all instance masks ===
         transformed = self.transforms(image=image, masks=masks)
         image_tensor = transformed['image']
         masks_tensor = torch.stack([torch.as_tensor(m, dtype=torch.uint8) for m in transformed['masks']])
+        # Union over instances -> binary semantic mask
+        mask_tensor = (masks_tensor.sum(dim=0) > 0).long()   # (512,512), {0,1}
 
-        # Calculate boxes (post-resize)
-        boxes = []
-        valid_indices = []
-        for i, mask in enumerate(masks_tensor):
-            pos = (mask == 1).nonzero()
-            if len(pos) == 0:
-                continue
-            xmin, ymin = pos.min(dim=0)[0][1], pos.min(dim=0)[0][0]
-            xmax, ymax = pos.max(dim=0)[0][1], pos.max(dim=0)[0][0]
-            if xmax <= xmin or ymax <= ymin:
-                continue
-            boxes.append(torch.tensor([xmin, ymin, xmax, ymax], dtype=torch.float32))
-            valid_indices.append(i)
-
-        if not boxes:
-            return image_tensor, empty_target()
-
-        # Filter valid masks/labels
-        masks_tensor = masks_tensor[valid_indices]
-        labels = [labels[i] for i in valid_indices]
-        areas = [areas[i] for i in valid_indices]
-        iscrowd = [iscrowd[i] for i in valid_indices]
-
-        target = {
-            "boxes": torch.stack(boxes),
-            "labels": torch.tensor(labels, dtype=torch.int64),
-            "masks": masks_tensor,
-            "image_id": torch.tensor([idx]),
-            "area": torch.tensor(areas, dtype=torch.float32),
-            "iscrowd": torch.tensor(iscrowd, dtype=torch.int64),
-        }
-
-        return image_tensor, target
+        # === CHANGED: return (image, mask, count) instead of detection dict ===
+        return image_tensor, mask_tensor, entry['cell_count']
 
 # Debug function to check your dataset
 def debug_dataset_labels(dataset, num_samples=10):

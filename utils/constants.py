@@ -17,7 +17,7 @@ DEVICE = torch.device(f'cuda:{best_gpu}' if torch.cuda.is_available() else 'cpu'
 
 # Set model to run
 MODELS = ['Mask_R_CNN_ResNet50', 'Unet', 'YOLOv8']
-MODEL_NAME = 'Unet'
+MODEL_NAME = 'Mask_R_CNN_ResNet50'
 assert MODEL_NAME in MODELS
 
 model_args = {

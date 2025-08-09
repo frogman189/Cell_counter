@@ -2,7 +2,7 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 from typing import Dict, List
-
+from scipy.ndimage import label as connected_components
 
 
 def count_predictions(prediction: Dict, confidence_threshold: float = 0.5):
@@ -11,33 +11,58 @@ def count_predictions(prediction: Dict, confidence_threshold: float = 0.5):
         valid_predictions = prediction['scores'] >= confidence_threshold
         return valid_predictions.sum().item()
     return 0
+
+
+def count_from_mask(mask, threshold=0.5):
+    binary = (mask > threshold).astype(np.uint8)
+    _, num_objects = connected_components(binary)
+    return num_objects
     
 
 
-def calculate_counting_metrics(predictions: List[int], ground_truths: List[int], thresholds: List[int]):
-    """Calculate MSE and threshold-based accuracy metrics"""
-    predictions = np.array(predictions)
-    ground_truths = np.array(ground_truths)
+# def calculate_counting_metrics(predictions: List[int], ground_truths: List[int], thresholds: List[int]):
+#     """Calculate MSE and threshold-based accuracy metrics"""
+#     predictions = np.array(predictions)
+#     ground_truths = np.array(ground_truths)
     
-    # MSE
+#     # MSE
+#     mse = np.mean((predictions - ground_truths) ** 2)
+    
+#     # MAE (Mean Absolute Error)
+#     mae = np.mean(np.abs(predictions - ground_truths))
+    
+#     # Threshold-based accuracies
+#     metrics = {
+#         'mse': mse,
+#         'mae': mae,
+#         'mean_pred': np.mean(predictions),
+#         'mean_gt': np.mean(ground_truths)
+#     }
+    
+#     for threshold in thresholds:
+#         correct_predictions = np.abs(predictions - ground_truths) <= threshold
+#         accuracy = np.mean(correct_predictions) * 100  # Convert to percentage
+#         metrics[f'acc_thresh_{threshold}'] = accuracy
+    
+#     return metrics
+
+def calculate_counting_metrics(predictions, ground_truths, thresholds):
+    """Calculate MSE/MAE and threshold-based accuracy for counts."""
+    predictions = np.array(predictions, dtype=float)
+    ground_truths = np.array(ground_truths, dtype=float)
+
     mse = np.mean((predictions - ground_truths) ** 2)
-    
-    # MAE (Mean Absolute Error)
     mae = np.mean(np.abs(predictions - ground_truths))
-    
-    # Threshold-based accuracies
+
     metrics = {
         'mse': mse,
         'mae': mae,
-        'mean_pred': np.mean(predictions),
-        'mean_gt': np.mean(ground_truths)
+        'mean_pred': float(np.mean(predictions)),
+        'mean_gt': float(np.mean(ground_truths)),
     }
-    
     for threshold in thresholds:
-        correct_predictions = np.abs(predictions - ground_truths) <= threshold
-        accuracy = np.mean(correct_predictions) * 100  # Convert to percentage
-        metrics[f'acc_thresh_{threshold}'] = accuracy
-    
+        correct = np.abs(predictions - ground_truths) <= threshold
+        metrics[f'acc_thresh_{threshold}'] = float(np.mean(correct) * 100.0)
     return metrics
 
 

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import LambdaLR
 import math
 from torch.utils.data import DataLoader
@@ -10,11 +11,12 @@ from preprocess import prepare_dataset, LiveCellDataset
 import numpy as np
 from torchvision.models.detection import MaskRCNN_ResNet50_FPN_Weights
 import time
+from scipy.ndimage import label as connected_components
 
 from utils.logger_utils import setup_logging
-from utils.constants import TIME, model_args, train_cfg, dataset_paths, SAVE_MODEL, DEVICE, RUN_EXP
+from utils.constants import TIME, model_args, train_cfg, dataset_paths, SAVE_MODEL, DEVICE, RUN_EXP, MODEL_NAME
 from models import get_model, save_model
-from utils.metrics import count_predictions, calculate_counting_metrics, plot_training_results
+from utils.metrics import count_predictions, calculate_counting_metrics, plot_training_results, count_from_mask
 
 
 
@@ -52,8 +54,99 @@ class CountMSELoss(nn.Module):
 
     def forward(self, pred_counts, true_counts):
         return nn.functional.mse_loss(pred_counts.float(), true_counts.float())
+    
 
-        
+class FocalLoss(nn.Module):
+    """
+    Multi-class focal loss on logits (CrossEntropy with modulating factor).
+    targets: LongTensor of shape (N, H, W) with class indices [0..C-1].
+    """
+    def __init__(self, gamma: float = 2.0, alpha: float = 0.25, reduction: str = "mean", ignore_index: int = -100):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
+        self.ignore_index = ignore_index
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # logits: (N, C, H, W); targets: (N, H, W)
+        ce = F.cross_entropy(logits, targets, reduction="none", ignore_index=self.ignore_index)
+        # pt = exp(-CE)
+        pt = torch.exp(-ce)
+        focal = self.alpha * (1 - pt) ** self.gamma * ce
+
+        if self.reduction == "mean":
+            # exclude ignored from mean
+            if self.ignore_index >= 0:
+                mask = (targets != self.ignore_index).float()
+                return (focal * mask).sum() / (mask.sum().clamp_min(1.0))
+            return focal.mean()
+        elif self.reduction == "sum":
+            return focal.sum()
+        else:
+            return focal
+
+
+class SoftDiceLoss(nn.Module):
+    """
+    Multi-class soft Dice on probabilities (softmax inside).
+    By default averages over all classes; you can choose to exclude background.
+    targets: LongTensor (N, H, W)
+    """
+    def __init__(self, smooth: float = 1e-6, exclude_bg: bool = False, ignore_index: int = -100):
+        super().__init__()
+        self.smooth = smooth
+        self.exclude_bg = exclude_bg
+        self.ignore_index = ignore_index
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # logits: (N, C, H, W); targets: (N, H, W)
+        N, C, H, W = logits.shape
+        probs = F.softmax(logits, dim=1)
+
+        # One-hot target with ignore support
+        with torch.no_grad():
+            # targets_one_hot: (N, H, W, C) -> (N, C, H, W)
+            targets_clamped = targets.clamp_min(0)  # keep ignore as-is (will mask out below)
+            oh = F.one_hot(targets_clamped, num_classes=C).permute(0, 3, 1, 2).to(probs.dtype)  # (N,C,H,W)
+
+            if self.ignore_index >= 0:
+                valid = (targets != self.ignore_index).unsqueeze(1)  # (N,1,H,W)
+                oh = oh * valid  # zero out ignored in one-hot
+                probs = probs * valid  # exclude ignored from prediction mass as well
+
+        dims = (0, 2, 3)  # sum over N,H,W per class
+        if self.exclude_bg and C > 1:
+            probs = probs[:, 1:, :, :]
+            oh    = oh[:, 1:, :, :]
+
+        intersection = (probs * oh).sum(dims)
+        denom = (probs * probs).sum(dims) + (oh * oh).sum(dims)
+        dice = (2 * intersection + self.smooth) / (denom + self.smooth)
+        loss = 1.0 - dice.mean()
+        return loss
+
+
+class CompoundSegLoss(nn.Module):
+    """
+    Focal(γ=2) + Dice (1:1 by default).
+    """
+    def __init__(self,
+                 focal_gamma: float = 2.0,
+                 focal_alpha: float = 0.25,
+                 dice_exclude_bg: bool = False,
+                 w_focal: float = 1.0,
+                 w_dice: float = 1.0,
+                 ignore_index: int = -100):
+        super().__init__()
+        self.focal = FocalLoss(gamma=focal_gamma, alpha=focal_alpha, ignore_index=ignore_index)
+        self.dice = SoftDiceLoss(exclude_bg=dice_exclude_bg, ignore_index=ignore_index)
+        self.wf = w_focal
+        self.wd = w_dice
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        return self.wf * self.focal(logits, targets) + self.wd * self.dice(logits, targets)
+
 
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
     def lr_lambda(current_step):
@@ -65,10 +158,11 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
 
 
 def collate_fn(batch):
-    """Custom collate function for handling variable-sized targets"""
-    images, targets = zip(*batch)
-    images = torch.stack(images, 0)
-    return images, list(targets)
+    images, masks, cell_counts = zip(*batch)        # masks are tensors, not dicts
+    images = torch.stack(images, 0)                 # (N, C, H, W)
+    masks  = torch.stack(masks, 0).long()           # (N, H, W)
+    cell_counts = torch.tensor(cell_counts, dtype=torch.float32)
+    return images, masks, cell_counts
 
 
 def train_cfg_for_optuna(trial, train_cfg):
@@ -80,33 +174,65 @@ def train_cfg_for_optuna(trial, train_cfg):
     return train_cfg
 
 
-def train_epoch(model, optimizer, scheduler, train_loader, device, batch_size=16, accumulation_steps = 4):
+
+def get_predicted_counts(model, images, device, threshold=0.5):
+    if MODEL_NAME == 'Mask_R_CNN_ResNet50':
+        outputs = model(images)
+        return torch.tensor([count_predictions(p, threshold) for p in outputs], dtype=torch.float32, device=device)
+    else:
+        with torch.no_grad():
+            outputs = model(images)
+            if isinstance(outputs, dict):
+                outputs = outputs["out"]
+            probs = torch.softmax(outputs, dim=1)[:, 1, :, :]
+            return torch.tensor(
+                [count_from_mask(p.cpu().numpy(), threshold) for p in probs],
+                dtype=torch.float32, device=device
+            )
+
+
+class SoftCountWrapper(nn.Module):
+    """
+    Wraps a segmentation model that outputs logits (N,1,H,W).
+    Produces a scalar count per image using soft-count.
+
+    Optionally learns a global scalar alpha multiplying the soft area
+    (equivalent to learning 1/avg_cell_area).
+    """
+    def __init__(self, seg_model: nn.Module, avg_cell_area: float, learn_alpha: bool = False):
+        super().__init__()
+        self.seg_model = seg_model
+        if learn_alpha:
+            # initialize alpha ~ 1/avg_cell_area
+            self.alpha = nn.Parameter(torch.tensor([1.0/float(avg_cell_area)], dtype=torch.float32))
+        else:
+            self.register_buffer("alpha", torch.tensor([1.0/float(avg_cell_area)], dtype=torch.float32))
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        logits = self.seg_model(images)        # (N,1,H,W)
+        probs  = torch.sigmoid(logits)         # (N,1,H,W)
+        soft_area = probs.sum(dim=(2,3))       # (N,1)
+        pred_counts = soft_area * self.alpha   # (N,1)
+        return pred_counts.squeeze(1)          # (N,)
+
+
+def train_epoch(model, optimizer, scheduler, criterion, train_loader, device):
     """Train for one epoch"""
     model.train()
     total_loss = 0.0
     num_batches = 0
     
-    for i, (images, targets) in enumerate(train_loader):
+    for i, (images, targets, gt_counts) in enumerate(train_loader):
         images = images.to(device)
-        targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()} for target in targets]
+        #targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()} for target in targets]
+        targets = targets.to(device)
+        gt_counts = gt_counts.to(device)
         
         optimizer.zero_grad()
         
-        # Forward pass
-        losses = model(images, targets)
-        
-        if isinstance(losses, dict):
-            # Mask R-CNN returns dict of losses
-            loss = sum(losses.values())
-        else:
-            loss = losses
-        # loss = loss / accumulation_steps
-
-        # loss.backward()
-
-        # if (i + 1) % accumulation_steps == 0:
-        #     optimizer.step()
-        #     optimizer.zero_grad()
+        #pred_counts = get_predicted_counts(model, images, device)
+        logits = model(images) 
+        loss = criterion(logits, targets)
         
         # Backward pass
         loss.backward()
@@ -119,15 +245,10 @@ def train_epoch(model, optimizer, scheduler, train_loader, device, batch_size=16
         #print(f"Batch Loss: {loss.item():.4f}")
         #print(f"Memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
     
-    # Handle remaining gradients (if total batches % accumulation_steps != 0)
-    # if (i + 1) % accumulation_steps != 0:
-    #     optimizer.step()
-    #     optimizer.zero_grad()
-    
     return total_loss / num_batches if num_batches > 0 else 0.0
 
 
-def validate_epoch(model, val_loader, device):
+def validate_epoch(model, val_loader, criterion, device):
     """Validate for one epoch with counting metrics"""
     model.eval()
     total_loss = 0.0
@@ -139,41 +260,33 @@ def validate_epoch(model, val_loader, device):
     thresholds = [0, 1, 3, 5, 10, 20]
     
     with torch.no_grad():
-        for images, targets in val_loader:
+        for images, targets, gt_counts  in val_loader:
             images = images.to(device)
-            targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()} for target in targets]
+            #targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()} for target in targets]
+            targets = targets.to(device)
+            gt_counts = gt_counts.to(device)
             
             # Calculate loss (need train mode for Mask R-CNN)
-            model.train()
-            losses = model(images, targets)
-            model.eval()
-            
-            if isinstance(losses, dict):
-                loss = sum(losses.values())
-            else:
-                loss = losses
+            #pred_counts = get_predicted_counts(model, images, device)
+            logits = model(images) 
+            loss = criterion(logits, targets)
+
+            # ---- count from predicted masks (class-1 prob) ----
+            probs = torch.softmax(logits, dim=1)[:, 1, :, :]  # (N,H,W)
+            for p in probs:  # p: (H,W)
+                pred_count = count_from_mask(p.cpu().numpy())
+                all_predictions.append(int(pred_count))
             
             total_loss += loss.item()
-            
-            # Get predictions for counting
-            predictions = model(images, None)
-            
-            # Count objects in predictions and ground truth
-            for i, (pred, target) in enumerate(zip(predictions, targets)):
-                # Ground truth count
-                gt_count = len(target['labels'])
-                
-                # Predicted count (filter by confidence score)
-                pred_count = count_predictions(pred, confidence_threshold=0.5)
-                
-                all_predictions.append(pred_count)
-                all_ground_truths.append(gt_count)
+            #all_predictions.extend(logits.tolist())
+            #all_ground_truths.extend(gt_counts.tolist())
+            all_ground_truths.extend([int(x) for x in gt_counts.cpu().tolist()])
             
             num_batches += 1
     
     # Calculate final metrics
     metrics = calculate_counting_metrics(all_predictions, all_ground_truths, thresholds)
-    metrics['loss'] = total_loss / num_batches if num_batches > 0 else 0.0
+    metrics['loss'] = (total_loss / num_batches) if num_batches > 0 else 0.0
     
     return metrics
 
@@ -198,6 +311,14 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
 
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_training_steps)
 
+    #criterion = CountMSELoss()
+    criterion = CompoundSegLoss(
+        focal_gamma=2.0, focal_alpha=0.25,
+        dice_exclude_bg=False,   # set True to focus Dice on the cell class only
+        w_focal=1.0, w_dice=1.0,
+        ignore_index=255         # or whatever you use for "void"/ignore
+    )
+
     logger, log_file_path, output_dir = setup_logging(train_cfg, TIME, model_args, optuna=optuna, run_exp=RUN_EXP)
 
     since = time.time()
@@ -215,10 +336,10 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
         logger.warning('Epoch {}/{}'.format(epoch+1, epochs))
         logger.warning('-' * 10)
 
-        train_loss = train_epoch(model, optimizer, scheduler, train_loader, device)
+        train_loss = train_epoch(model, optimizer, scheduler, criterion, train_loader, device)
         train_losses.append(train_loss)
 
-        val_metrics = validate_epoch(model, val_loader, device)
+        val_metrics = validate_epoch(model, val_loader, criterion, device)
         val_loss = val_metrics['loss']
         val_losses.append(val_loss)
         val_metrics_history.append(val_metrics)
