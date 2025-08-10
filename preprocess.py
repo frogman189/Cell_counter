@@ -201,10 +201,11 @@ def prepare_dataset(path_to_original_dataset, path_to_livecell_images, path_to_l
 
 
 class LiveCellDataset(Dataset):
-    def __init__(self, data_entries):
+    def __init__(self, data_entries, img_size=512):
         self.data = data_entries
         self.transforms = A.Compose([
-            A.Resize(512, 512, interpolation=cv2.INTER_NEAREST),  # Critical for masks
+            # use LINEAR for images; NEAREST was for masks
+            A.Resize(img_size, img_size, interpolation=cv2.INTER_LINEAR),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ])

@@ -56,7 +56,7 @@ def calculate_trainable(model):
 #     model.roi_heads.mask_predictor = torchvision.models.detection.mask_rcnn.MaskRCNNPredictor(in_features_mask, hidden_layer, num_classes)
 
 #     return model
-def load_maskrcnn_resnet50_fpn_v2_for_cells(num_classes: int):
+def load_maskrcnn_ResNet50_model(num_classes: int):
     weights = MaskRCNN_ResNet50_FPN_V2_Weights.COCO_V1
     # Smaller anchors help nuclei/cell scales; tune sizes to your pixel scale
     anchor_generator = AnchorGenerator(
@@ -122,6 +122,58 @@ def load_unet_model(num_classes: int = 2,
 
     return model
 
+
+# --- ADD: imports at top of models.py ---
+from torchvision.models import vit_b_16, ViT_B_16_Weights, convnext_small, ConvNeXt_Small_Weights
+import torch.nn.functional as F
+import torch.nn as nn
+
+# --- ADD: image-level count regressor ---
+class ImageCountRegressor(nn.Module):
+    """
+    Image -> scalar count.
+    backbone: 'vit_b_16' or 'convnext_small'
+    loss_type only affects forward’s activation (poisson uses softplus, huber uses relu).
+    """
+    def __init__(self, backbone: str = "vit_b_16", loss_type: str = "huber"):
+        super().__init__()
+        self.loss_type = loss_type
+
+        if backbone == "vit_b_16":
+            m = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
+            d = m.heads.head.in_features
+            m.heads.head = nn.Sequential(
+                nn.Linear(d, d // 2),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.1),
+                nn.Linear(d // 2, 1),
+            )
+            self.backbone = m
+
+        elif backbone == "convnext_small":
+            m = convnext_small(weights=ConvNeXt_Small_Weights.IMAGENET1K_V1)
+            in_dim = m.classifier[-1].in_features
+            m.classifier = nn.Sequential(
+                m.classifier[0],                 # LayerNorm
+                nn.Linear(in_dim, in_dim // 2),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.1),
+                nn.Linear(in_dim // 2, 1),
+            )
+            self.backbone = m
+        else:
+            raise ValueError(f"Unknown backbone: {backbone}")
+
+    def forward(self, x):
+        y = self.backbone(x).squeeze(1)  # (N,)
+        if self.loss_type == "poisson":
+            # positive rate for Poisson
+            y = F.softplus(y) + 1e-6
+        else:
+            # keep non-negative counts for regression
+            y = F.relu(y)
+        return y
+
 #Fine tune Yolo guide: https://docs.ultralytics.com/tasks/segment/ - maybe aviad can take this personly, can teach alot.
 #Important: expected input size: (B, 3, 640, 640)
 def load_yolov8_seg_model(num_classes=1, model_size="yolov8s-seg.pt"):
@@ -159,6 +211,11 @@ def get_model():
         model = load_unet_model(num_classes=2)
     elif MODEL_NAME == "YOLOv8":
         model = load_yolov8_seg_model(num_classes=1)
+    elif MODEL_NAME == "ViT_Count":
+        return ImageCountRegressor(backbone="vit_b_16", loss_type="huber") #model_args.get("loss_type", "huber"))
+    elif MODEL_NAME == "ConvNeXt_Count":
+        return ImageCountRegressor(backbone="convnext_small", loss_type="huber") #model_args.get("loss_type", "huber"))
+
 
     set_parameter_requires_grad(model, feature_extracting=False)
     calculate_trainable(model)

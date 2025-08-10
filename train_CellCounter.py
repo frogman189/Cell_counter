@@ -12,13 +12,23 @@ import numpy as np
 from torchvision.models.detection import MaskRCNN_ResNet50_FPN_Weights
 import time
 from scipy.ndimage import label as connected_components
+from torch.nn import SmoothL1Loss
 
 from utils.logger_utils import setup_logging
 from utils.constants import TIME, model_args, train_cfg, dataset_paths, SAVE_MODEL, DEVICE, RUN_EXP, MODEL_NAME
 from models import get_model, save_model
 from utils.metrics import count_predictions, calculate_counting_metrics, plot_training_results, count_from_mask
 
-
+# --- ADD: a tiny factory for the image-level regression loss ---
+def make_regression_loss(loss_type: str = "huber", huber_delta: float = 5.0):
+    huber_delta = float(huber_delta)  # <— add this
+    if loss_type == "poisson":
+        def _poisson(pred, target):
+            return F.poisson_nll_loss(pred, target, log_input=False, full=True)
+        return _poisson
+    def _huber(pred, target):
+        return F.smooth_l1_loss(pred, target, beta=huber_delta)
+    return _huber
 
 #     self.plot_training_history(save_dir)
 
@@ -216,11 +226,13 @@ class SoftCountWrapper(nn.Module):
         return pred_counts.squeeze(1)          # (N,)
 
 
-def train_epoch(model, optimizer, scheduler, criterion, train_loader, device):
+def train_epoch(model, optimizer, criterion, train_loader, device): #, scheduler
     """Train for one epoch"""
     model.train()
     total_loss = 0.0
     num_batches = 0
+
+    is_regressor = MODEL_NAME in ("ViT_Count", "ConvNeXt_Count")
     
     for i, (images, targets, gt_counts) in enumerate(train_loader):
         images = images.to(device)
@@ -230,14 +242,19 @@ def train_epoch(model, optimizer, scheduler, criterion, train_loader, device):
         
         optimizer.zero_grad()
         
-        #pred_counts = get_predicted_counts(model, images, device)
-        logits = model(images) 
-        loss = criterion(logits, targets)
+        if is_regressor:
+            # IMAGE -> SCALAR
+            pred_counts = model(images)              # (N,)
+            loss = criterion(pred_counts, gt_counts) # regression loss
+        else:
+            # SEGMENTATION path (unchanged)
+            logits = model(images)
+            loss = criterion(logits, targets)
         
         # Backward pass
         loss.backward()
         optimizer.step()
-        scheduler.step()
+        #scheduler.step()
         
         total_loss += loss.item()
         num_batches += 1
@@ -258,29 +275,39 @@ def validate_epoch(model, val_loader, criterion, device):
     all_predictions = []
     all_ground_truths = []
     thresholds = [0, 1, 3, 5, 10, 20]
+
+    is_regressor = MODEL_NAME in ("ViT_Count", "ConvNeXt_Count")
     
     with torch.no_grad():
-        for images, targets, gt_counts  in val_loader:
+        for images, targets, gt_counts in val_loader:
             images = images.to(device)
-            #targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()} for target in targets]
-            targets = targets.to(device)
+            targets = targets.to(device)  # harmless for regressor
             gt_counts = gt_counts.to(device)
-            
-            # Calculate loss (need train mode for Mask R-CNN)
-            #pred_counts = get_predicted_counts(model, images, device)
-            logits = model(images) 
-            loss = criterion(logits, targets)
 
-            # ---- count from predicted masks (class-1 prob) ----
-            probs = torch.softmax(logits, dim=1)[:, 1, :, :]  # (N,H,W)
-            for p in probs:  # p: (H,W)
-                pred_count = count_from_mask(p.cpu().numpy())
-                all_predictions.append(int(pred_count))
+            if is_regressor:
+                # ---- image-level regression path ----
+                pred_counts = model(images)                 # (N,)
+                loss = criterion(pred_counts, gt_counts)    # scalar loss
+
+                # for counting metrics, use integers
+                all_predictions.extend([int(round(x)) for x in pred_counts.cpu().tolist()])
+                all_ground_truths.extend([int(x) for x in gt_counts.cpu().tolist()])
+
+            else:
+                # ---- segmentation path (unchanged) ----
+                logits = model(images)                      # (N,C,H,W)
+                loss = criterion(logits, targets)
+
+                probs = torch.softmax(logits, dim=1)[:, 1, :, :]  # (N,H,W)
+                for p in probs:
+                    pred_count = count_from_mask(p.cpu().numpy())
+                    all_predictions.append(int(pred_count))
+                all_ground_truths.extend([int(x) for x in gt_counts.cpu().tolist()])
             
             total_loss += loss.item()
             #all_predictions.extend(logits.tolist())
             #all_ground_truths.extend(gt_counts.tolist())
-            all_ground_truths.extend([int(x) for x in gt_counts.cpu().tolist()])
+            #all_ground_truths.extend([int(x) for x in gt_counts.cpu().tolist()])
             
             num_batches += 1
     
@@ -307,17 +334,22 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
         optimizer = torch.optim.RAdam(model.parameters(), lr=train_cfg['learning_rate'])
 
     total_training_steps = len(train_loader) * train_cfg['num_epochs']
-    warmup_steps = int(0.1 * total_training_steps)  # 10% warm-up
+    warmup_steps = int(0.01 * total_training_steps)  # 10% warm-up
 
-    scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_training_steps)
+    #scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_training_steps)
 
     #criterion = CountMSELoss()
-    criterion = CompoundSegLoss(
-        focal_gamma=2.0, focal_alpha=0.25,
-        dice_exclude_bg=False,   # set True to focus Dice on the cell class only
-        w_focal=1.0, w_dice=1.0,
-        ignore_index=255         # or whatever you use for "void"/ignore
-    )
+    if MODEL_NAME in ("ViT_Count", "ConvNeXt_Count"):
+        loss_type = "huber" #model_args.get("loss_type", "huber")   # 'huber' or 'poisson'
+        huber_delta = 5.0 #model_args.get("huber_delta", 5.0)
+        criterion = make_regression_loss(loss_type=loss_type, huber_delta=huber_delta)
+    else:
+        criterion = CompoundSegLoss(
+            focal_gamma=2.0, focal_alpha=0.25,
+            dice_exclude_bg=False,
+            w_focal=1.0, w_dice=1.0,
+            ignore_index=255
+        )
 
     logger, log_file_path, output_dir = setup_logging(train_cfg, TIME, model_args, optuna=optuna, run_exp=RUN_EXP)
 
@@ -327,7 +359,7 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
     val_losses = []
     val_metrics_history = [] 
     best_val_loss = float('inf')
-    best_val_accuracy = 0.0
+    best_val_accuracy = -1.0
     best_checkpoint = {}
     best_val_metrics = {}
 
@@ -336,7 +368,7 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
         logger.warning('Epoch {}/{}'.format(epoch+1, epochs))
         logger.warning('-' * 10)
 
-        train_loss = train_epoch(model, optimizer, scheduler, criterion, train_loader, device)
+        train_loss = train_epoch(model, optimizer, criterion, train_loader, device) #, scheduler
         train_losses.append(train_loss)
 
         val_metrics = validate_epoch(model, val_loader, criterion, device)
@@ -357,7 +389,7 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
                 acc = val_metrics[f'acc_thresh_{thresh}']
                 logger.warning(f"  Accuracy @ threshold {thresh}: {acc:.1f}%")
 
-        if val_metrics[f'acc_thresh_3'] < best_val_accuracy:
+        if val_metrics[f'acc_thresh_3'] > best_val_accuracy:
             best_val_accuracy = val_metrics[f'acc_thresh_3']
             best_val_metrics = val_metrics
             # Save checkpoint
@@ -365,7 +397,7 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
+                #'scheduler_state_dict': scheduler.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss
             }
@@ -384,7 +416,7 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
         acc = best_val_metrics[f'acc_thresh_{thresh}']
         logger.warning(f"  Accuracy @ threshold {thresh}: {acc:.1f}%")
 
-    if not optuna and not RUN_EXP:
+    if not optuna and RUN_EXP:
         plot_training_results(train_losses, val_losses, val_metrics_history, output_dir)
 
     if optuna:
@@ -403,8 +435,9 @@ def main():
     # path_to_labels = "/home/meidanzehavi/Cell_counter/livecell_dataset"
 
     dataset_dict = prepare_dataset(dataset_paths['path_to_original_dataset'], dataset_paths['path_to_livecell_images'], dataset_paths['path_to_labels'])
-    train_dataset = LiveCellDataset(dataset_dict['train'])
-    val_dataset = LiveCellDataset(dataset_dict['val'])
+    img_size = 224 if MODEL_NAME in ("ViT_Count", "ConvNeXt_Count") else 512
+    train_dataset = LiveCellDataset(dataset_dict['train'], img_size=img_size)
+    val_dataset   = LiveCellDataset(dataset_dict['val'],   img_size=img_size)
 
     model = get_model()
     model.to(DEVICE)
