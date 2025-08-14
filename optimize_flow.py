@@ -25,24 +25,14 @@ def save_optuna_results(study, timestamp):
     print(f"Results saved at: {csv_path}")
 
     # Plot and save contour plot
-    # contour_plot = optuna.visualization.plot_contour(study, params=["lr", "alpha", "batch_size"])
-    # contour_path = os.path.join(output_dir, f"{STUDY_NAME}_lr_alpha_BatchSize_contour.png")
-    # contour_plot.write_image(contour_path)
+    contour_plot = optuna.visualization.plot_contour(study, params=["lr", "weight_count", "batch_size"])
+    contour_path = os.path.join(output_dir, f"{STUDY_NAME}_lr_aweight_count_BatchSize_contour.png")
+    contour_plot.write_image(contour_path)
 
     # Plot and save contour plot of lr and batch_size
     contour_plot = optuna.visualization.plot_contour(study, params=["lr", "batch_size"])
     contour_path = os.path.join(output_dir, f"{STUDY_NAME}_lr_batch_size_contour.png")
     contour_plot.write_image(contour_path)
-
-    # # Plot and save contour plot of gamma and alpha
-    # contour_plot = optuna.visualization.plot_contour(study, params=["gamma", "alpha"])
-    # contour_path = os.path.join(output_dir, f"{STUDY_NAME}_gamma_alpha_contour.png")
-    # contour_plot.write_image(contour_path)
-
-    # Plot and save contour plot of lambbda and alpha
-    # contour_plot = optuna.visualization.plot_contour(study, params=["lambbda", "alpha"])
-    # contour_path = os.path.join(output_dir, f"{STUDY_NAME}_lambbda_alpha_contour.png")
-    # contour_plot.write_image(contour_path)
 
     # Plot and save parameter importance
     importance_plot = optuna.visualization.plot_param_importances(study)
@@ -52,6 +42,19 @@ def save_optuna_results(study, timestamp):
     plt.close('all')  # Close plots to avoid memory leaks
     print(f"Plots saved in: {output_dir}")
 
+    try:
+        best = study.best_trial
+        best_txt = os.path.join(output_dir, "best_params.txt")
+        with open(best_txt, "w") as f:
+            f.write(f"Study: {STUDY_NAME}\n")
+            f.write(f"Timestamp: {timestamp}\n")
+            f.write(f"Best value: {best.value}\n")
+            f.write("Best params:\n")
+            for k, v in best.params.items():
+                f.write(f"  {k}: {v}\n")
+        print(f"Best params saved at: {best_txt}")
+    except Exception as e:
+        print(f"Could not save best params: {e}")
 
 
 def optimize_hyperparameters():
