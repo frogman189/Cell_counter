@@ -20,32 +20,6 @@ def count_from_mask(mask, threshold=0.5):
     
 
 
-# def calculate_counting_metrics(predictions: List[int], ground_truths: List[int], thresholds: List[int]):
-#     """Calculate MSE and threshold-based accuracy metrics"""
-#     predictions = np.array(predictions)
-#     ground_truths = np.array(ground_truths)
-    
-#     # MSE
-#     mse = np.mean((predictions - ground_truths) ** 2)
-    
-#     # MAE (Mean Absolute Error)
-#     mae = np.mean(np.abs(predictions - ground_truths))
-    
-#     # Threshold-based accuracies
-#     metrics = {
-#         'mse': mse,
-#         'mae': mae,
-#         'mean_pred': np.mean(predictions),
-#         'mean_gt': np.mean(ground_truths)
-#     }
-    
-#     for threshold in thresholds:
-#         correct_predictions = np.abs(predictions - ground_truths) <= threshold
-#         accuracy = np.mean(correct_predictions) * 100  # Convert to percentage
-#         metrics[f'acc_thresh_{threshold}'] = accuracy
-    
-#     return metrics
-
 def calculate_counting_metrics(predictions, ground_truths, thresholds):
     """Calculate MSE/MAE and threshold-based accuracy for counts."""
     predictions = np.array(predictions, dtype=float)
@@ -64,6 +38,61 @@ def calculate_counting_metrics(predictions, ground_truths, thresholds):
         correct = np.abs(predictions - ground_truths) <= threshold
         metrics[f'acc_thresh_{threshold}'] = float(np.mean(correct) * 100.0)
     return metrics
+
+
+def print_metrics(metrics: dict,
+                         split: str = "val",
+                         model: str | None = None,
+                         n_images: int | None = None,
+                         decimals: int = 3,
+                         show_rmse: bool = False) -> None:
+    """
+    Nicely print the dict returned by calculate_counting_metrics(...).
+
+    Args:
+        metrics: dict with keys 'mse','mae','mean_pred','mean_gt', and acc_thresh_*.
+        split:   "val" or "test" (for the header).
+        model:   Optional model name for the header.
+        n_images:If known, number of evaluated images (for context).
+        decimals:Number of decimals for MSE/MAE/means.
+        show_rmse:Also display RMSE (= sqrt(MSE)).
+    """
+    import math
+
+    title_bits = [f"Results — {split}"]
+    if model: title_bits.insert(0, model)
+    title = " | ".join(title_bits)
+    bar = "-" * len(title)
+
+    def fmt(x): return f"{x:.{decimals}f}"
+
+    # Base lines
+    lines = [title, bar]
+    lines.append(f"MSE: {fmt(metrics['mse'])}   MAE: {fmt(metrics['mae'])}")
+    if show_rmse:
+        lines[-1] += f"   RMSE: {fmt(math.sqrt(metrics['mse']))}"
+
+    if 'mean_pred' in metrics and 'mean_gt' in metrics:
+        lines.append(f"Mean count — Pred: {fmt(metrics['mean_pred'])} | GT: {fmt(metrics['mean_gt'])}")
+
+    if n_images is not None:
+        lines.append(f"Images: {n_images}")
+
+    # Threshold block (e.g., acc_thresh_0, acc_thresh_1, ...)
+    thr_pairs = sorted(
+        ((int(k.rsplit("_", 1)[-1]), v) for k, v in metrics.items() if k.startswith("acc_thresh_")),
+        key=lambda x: x[0]
+    )
+    if thr_pairs:
+        header = "  ".join([f"±{t:>3}" for t, _ in thr_pairs])
+        values = "  ".join([f"{v:>5.1f}%" for _, v in thr_pairs])
+        lines.append("Acc @ thresholds")
+        lines.append(header)
+        lines.append(values)
+    else:
+        lines.append("Acc @ thresholds: N/A")
+
+    print("\n".join(lines))
 
 
 def plot_training_results(train_losses, val_losses, val_metrics_history, output_dir,

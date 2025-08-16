@@ -1,270 +1,3 @@
-# import os
-# import json
-# import zipfile
-# import pandas as pd
-# from PIL import Image
-# from pycocotools.coco import COCO
-# import torch
-# from torch.utils.data import Dataset
-# import numpy as np
-# from pycocotools import mask as maskUtils
-# import albumentations as A
-# from albumentations.pytorch import ToTensorV2
-# import cv2
-# from scipy.ndimage import gaussian_filter
-# from pycocotools.coco import COCO
-
-
-# def unzip_jsons(path_to_dataset_dir):
-#     json_zips = [
-#         "livecell_annotations_train.json.zip",
-#         "livecell_annotations_val.json.zip",
-#         "livecell_annotations_test.json.zip",
-#     ]
-#     for json_zip in json_zips:
-#         zip_path = os.path.join(path_to_dataset_dir, json_zip)
-#         if os.path.exists(zip_path):
-#             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-#                 zip_ref.extractall(path_to_dataset_dir)
-#                 print(f"Extracted {json_zip}")
-
-
-# def load_annotations(path_to_dataset_dir):
-#     # Assumes unzipped json files are present in the same dir
-#     coco_anns = {}
-#     for split in ['train', 'val', 'test']:
-#         json_path = os.path.join(path_to_dataset_dir, f'livecell_annotations_{split}.json')
-#         coco = COCO(json_path)
-#         coco_anns[split] = coco
-#     return coco_anns
-
-
-# def load_labels_csv(path_to_labels_dir):
-#     labels = {}
-#     for split in ['train', 'val', 'test']:
-#         csv_path = os.path.join(path_to_labels_dir, f"{split}_data.csv")
-#         df = pd.read_csv(csv_path)
-#         labels[split] = df
-#     return labels
-
-
-# def build_data_entries(coco_anns, labels, path_to_images_root):
-#     dataset = {}
-#     for split in ['train', 'val', 'test']:
-#         coco = coco_anns[split]
-#         label_df = labels[split]
-#         entries = []
-
-#         for _, row in label_df.iterrows():
-#             filename_from_csv = row['filename']
-#             filename_only = os.path.basename(filename_from_csv)
-
-#             matched = [
-#                 img for img in coco.imgs.values()
-#                 if os.path.basename(img['file_name']) == filename_only
-#             ]
-#             if not matched:
-#                 print(f"Warning: could not find annotation for {filename_from_csv}")
-#                 continue
-
-#             img_info = matched[0]
-#             img_id = img_info['id']
-#             ann_ids = coco.getAnnIds(imgIds=[img_id])
-#             anns = coco.loadAnns(ann_ids)
-
-#             # NEW: centroids from full masks (polygon or RLE) via coco.annToMask
-#             centroids = []
-#             for ann in anns:
-#                 m = coco.annToMask(ann)
-#                 ys, xs = np.where(m > 0)
-#                 if xs.size:
-#                     centroids.append([float(xs.mean()), float(ys.mean())])
-
-#             entry = {
-#                 'filename': os.path.join(path_to_images_root, split, filename_from_csv),
-#                 'cell_count': int(row['cell_count']),
-#                 'width': img_info['width'],
-#                 'height': img_info['height'],
-#                 'annotations': anns,          # keep if you still want it
-#                 'centroids': centroids,       # <-- use this in Dataset
-#                 'count_json': len(anns),      # optional: sanity check vs CSV
-#                 'file_name': img_info['file_name'],  # optional: original relpath
-#             }
-#             entries.append(entry)
-
-#         dataset[split] = entries
-#     return dataset
-
-# def prepare_dataset(path_to_original_dataset, path_to_livecell_images, path_to_labels):
-#     unzip_jsons(path_to_original_dataset)
-#     coco_anns = load_annotations(path_to_original_dataset)
-#     label_dfs = load_labels_csv(path_to_labels)
-#     dataset = build_data_entries(coco_anns, label_dfs, path_to_livecell_images)
-
-#     return dataset
-
-
-
-# def points_to_density(points, img_shape, sigma=8):
-#     H, W = img_shape
-#     density = np.zeros((H, W), dtype=np.float32)
-#     for x, y in points:
-#         # clamp to [0, W-1] and [0, H-1]
-#         x = np.clip(x, 0, W - 1e-6)
-#         y = np.clip(y, 0, H - 1e-6)
-#         ix = int(np.floor(x))
-#         iy = int(np.floor(y))
-#         density[iy, ix] += 1.0
-#     density = gaussian_filter(density, sigma=sigma)  # sum preserved
-#     return density
-
-
-# class LiveCellDataset(Dataset):
-#     def __init__(self, data_entries, img_size=512):
-#         self.data = data_entries
-#         self.img_size = img_size
-#         self.transforms = A.Compose([
-#             A.Resize(img_size, img_size, interpolation=cv2.INTER_LINEAR),
-#             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-#             ToTensorV2(),
-#         ])
-
-#     def __len__(self):
-#         return len(self.data)
-    
-#     def __getitem__(self, idx):
-#         entry = self.data[idx]
-#         image = np.array(Image.open(entry['filename']).convert("RGB"))
-
-#         # scale factors
-#         sx = self.img_size / float(entry['width'])
-#         sy = self.img_size / float(entry['height'])
-
-#         # use precomputed centroids
-#         points = entry.get('centroids', [])
-#         scaled_points = [(px * sx, py * sy) for (px, py) in points]
-
-#         density = points_to_density(scaled_points, (self.img_size, self.img_size), sigma=8)
-
-#         transformed = self.transforms(image=image)
-#         image_tensor = transformed['image'].float()
-#         density_tensor = torch.from_numpy(density).float().unsqueeze(0)
-#         return image_tensor, density_tensor, torch.tensor(entry['cell_count'], dtype=torch.float32)
-
-#     # def __getitem__(self, idx):
-#     #     entry = self.data[idx]
-#     #     image = np.array(Image.open(entry['filename']).convert("RGB"))
-        
-#     #     # Get all cell centers from annotations
-#     #     orig_w = float(entry['width'])
-#     #     orig_h = float(entry['height'])
-#     #     sx = self.img_size / orig_w
-#     #     sy = self.img_size / orig_h
-
-#     #     # Build points (unchanged logic, but fix polygon parsing below)
-#     #     points = []
-#     #     for ann in entry['annotations']:
-#     #         if 'segmentation' in ann:
-#     #             seg = ann['segmentation']
-#     #             # COCO polygon format: list of lists, each a flat [x1,y1,x2,y2,...]
-#     #             if isinstance(seg, list) and len(seg) > 0:
-#     #                 flat = seg[0] if isinstance(seg[0], (list, tuple)) else seg
-#     #                 coords = np.asarray(flat, dtype=np.float32).reshape(-1, 2)
-#     #                 centroid = coords.mean(axis=0)  # (x, y)
-#     #                 points.append(centroid.tolist())
-#     #             elif isinstance(seg, dict) and 'counts' in seg:
-#     #                 mask = maskUtils.decode(seg)
-#     #                 y, x = np.where(mask > 0)
-#     #                 if len(x) > 0:
-#     #                     points.append([float(x.mean()), float(y.mean())])
-#     #         elif 'bbox' in ann:
-#     #             x, y, w, h = ann['bbox']
-#     #             points.append([x + w/2.0, y + h/2.0])
-
-#     #     # --- scale points to the resized canvas
-#     #     scaled_points = [(px * sx, py * sy) for (px, py) in points]
-
-#     #     # Create density map on the resized grid
-#     #     density = points_to_density(scaled_points, (self.img_size, self.img_size), sigma=8)
-
-#     #     # Apply image transforms AFTER reading the image (unchanged)
-#     #     transformed = self.transforms(image=image)
-#     #     image_tensor = transformed['image'].float()
-#     #     density_tensor = torch.from_numpy(density).float().unsqueeze(0)
-#     #     return image_tensor, density_tensor, torch.tensor(entry['cell_count'], dtype=torch.float32)
-
-
-# # Debug function to check your dataset
-# def debug_dataset_labels(dataset, num_samples=10):
-#     """Debug function to check label distribution in your dataset"""
-#     print("=== DATASET DEBUG INFO ===")
-#     print(f"Dataset size: {len(dataset)}")
-    
-#     all_labels = []
-#     for i in range(min(num_samples, len(dataset))):
-#         try:
-#             image, target = dataset[i]
-#             labels = target['labels'].tolist()
-#             all_labels.extend(labels)
-#             print(f"Sample {i}: {len(labels)} objects, labels: {labels}")
-#         except Exception as e:
-#             print(f"Error in sample {i}: {e}")
-    
-#     if all_labels:
-#         print(f"\nLabel statistics:")
-#         print(f"  Min label: {min(all_labels)}")
-#         print(f"  Max label: {max(all_labels)}")
-#         print(f"  Unique labels: {sorted(set(all_labels))}")
-#         print(f"  Total labels: {len(all_labels)}")
-#     else:
-#         print("No labels found!")
-    
-# ### Example usage of the class:
-# ###dataset_dict = prepare_dataset(path_to_original_dataset, path_to_livecell_images, path_to_labels)
-# ###train_dataset = LiveCellDataset(dataset_dict['train'])
-
-
-
-# if __name__ == "__main__":
-#     # Define your paths here
-#     path_to_original_dataset = "/home/meidanzehavi/livecell"
-#     path_to_livecell_images = "/home/meidanzehavi/Cell_counter/livecell_dataset/images"
-#     path_to_labels = "/home/meidanzehavi/Cell_counter/livecell_dataset"
-
-#     dataset = prepare_dataset(path_to_original_dataset, path_to_livecell_images, path_to_labels)
-
-#     print(f"Train images: {len(dataset['train'])}")
-#     print(f"Val images: {len(dataset['val'])}")
-#     print(f"Test images: {len(dataset['test'])}")
-
-#     # Print the first training sample
-#     if dataset['train']:
-#         print("\nFirst training sample:")
-#         for key, value in dataset['train'][0].items():
-#             if key == "annotations":
-#                 print(f"{key}: {len(value)} annotations")
-#                 print("First 2 annotation entries:")
-#                 for ann in value[:2]:  # print first 2 annotations
-#                     print(json.dumps(ann, indent=2))  # pretty print
-#             else:
-#                 print(f"{key}: {value}")
-
-    
-#     train_dataset = LiveCellDataset(dataset['train'])
-#     debug_dataset_labels(train_dataset, num_samples=2)
-#     image, target = train_dataset[0]
-#     print("🔍 Image tensor shape:", image.shape)  # Should be [3, 512, 512]
-#     print("📦 Number of masks:", target['masks'].shape[0])
-#     print("🖼️ Mask tensor shape (per instance):", target['masks'].shape)  # [N, 512, 512]
-#     print("📦 Boxes shape:", target['boxes'].shape)
-#     print("📦 Boxes values:", target['boxes'])
-#     print("🏷️ Labels:", target['labels'])  # List of ints
-#     print("📐 Areas:", target['area'])
-#     print("🚧 Is crowd:", target['iscrowd'])
-#     print("🆔 Image ID:", target['image_id'])
-
-
-# ========= livecell_preprocess_fast.py =========
 import os
 import zipfile
 import pandas as pd
@@ -278,9 +11,10 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import cv2
 from scipy.ndimage import gaussian_filter
+from utils.constants import MODEL_NAME, dataset_paths
 
 # -----------------------------------------
-# unzip jsons (unchanged)
+# unzip jsons 
 # -----------------------------------------
 def unzip_jsons(path_to_dataset_dir):
     json_zips = [
@@ -296,7 +30,7 @@ def unzip_jsons(path_to_dataset_dir):
                 print(f"Extracted {json_zip}")
 
 # -----------------------------------------
-# load COCO jsons (unchanged)
+# load COCO jsons 
 # -----------------------------------------
 def load_annotations(path_to_dataset_dir):
     coco_anns = {}
@@ -308,7 +42,7 @@ def load_annotations(path_to_dataset_dir):
     return coco_anns
 
 # -----------------------------------------
-# load CSVs (tiny validation added)
+# load CSVs 
 # -----------------------------------------
 def load_labels_csv(path_to_labels_dir):
     labels = {}
@@ -324,7 +58,7 @@ def load_labels_csv(path_to_labels_dir):
     return labels
 
 # -----------------------------------------
-# build entries  (FAST: no annToMask here)
+# build entries 
 # -----------------------------------------
 def build_data_entries(coco_anns, labels, path_to_images_root):
     """
@@ -375,7 +109,7 @@ def prepare_dataset(path_to_original_dataset, path_to_livecell_images, path_to_l
     return build_data_entries(coco_anns, label_dfs, path_to_livecell_images)
 
 # -----------------------------------------
-# density utils (unchanged)
+# density utils 
 # -----------------------------------------
 def points_to_density(points, img_shape, sigma=8):
     H, W = img_shape
@@ -389,7 +123,7 @@ def points_to_density(points, img_shape, sigma=8):
     return density
 
 # -----------------------------------------
-# helper: compute centroids from full mask (lazy, per-item)
+# helper: compute centroids from full mask 
 # -----------------------------------------
 def _compute_centroids_from_annotations(anns, H, W):
     pts = []
@@ -414,7 +148,7 @@ def _compute_centroids_from_annotations(anns, H, W):
     return pts
 
 # -----------------------------------------
-# dataset (FAST + CORRECT)
+# dataset 
 # -----------------------------------------
 class LiveCellDataset(Dataset):
     def __init__(self, data_entries, img_size=512, imagenet_norm=True):
@@ -481,11 +215,174 @@ def debug_count_dataset(ds, k=2):
         img, dens, cnt = ds[i]
         print(f"[{i}] img {tuple(img.shape)} dens {tuple(dens.shape)} gt {int(cnt)} sum {float(dens.sum()):.1f}")
 
+
+# ---------- shared helpers for masks/boxes (do not affect old code) ----------
+def _decode_ann_masks(anns, H, W):
+    """Return list/stack of binary masks [N,H,W] from COCO anns."""
+    ms = []
+    for ann in anns:
+        seg = ann.get('segmentation')
+        if isinstance(seg, list) and len(seg) > 0:
+            rles = maskUtils.frPyObjects(seg, H, W)
+            rle  = maskUtils.merge(rles)
+            m    = maskUtils.decode(rle)
+        elif isinstance(seg, dict) and 'counts' in seg:
+            m = maskUtils.decode(seg)
+        else:
+            m = None
+        if m is not None:
+            ms.append(m.astype(np.uint8))
+    if len(ms) == 0:
+        return np.zeros((0, H, W), dtype=np.uint8)
+    return np.stack(ms, axis=0)
+
+def _masks_to_boxes(msk):
+    """Compute xyxy boxes from binary masks. msk: [N,H,W] uint8."""
+    if msk.shape[0] == 0:
+        return np.zeros((0, 4), dtype=np.float32)
+    N, H, W = msk.shape
+    boxes = np.zeros((N, 4), dtype=np.float32)
+    for i in range(N):
+        ys, xs = np.where(msk[i] > 0)
+        if xs.size == 0:
+            boxes[i] = 0
+        else:
+            x1, y1 = xs.min(), ys.min()
+            x2, y2 = xs.max(), ys.max()
+            boxes[i] = [x1, y1, x2, y2]
+    return boxes
+
+def _instance_to_semantic(masks, num_classes=2):
+    """
+    Collapse instances to a class map.
+    For num_classes=2 (bg/cell) => {0,1}.
+    """
+    if masks.shape[0] == 0:
+        return np.zeros(masks.shape[1:], dtype=np.uint8)
+    fg = (masks.sum(axis=0) > 0).astype(np.uint8)
+    return fg  # 0/1 map
+
+# ---------------------- Mask R-CNN dataset ----------------------
+class LiveCellMaskRCNNDataset(Dataset):
+    """
+    Returns (image_tensor, target_dict) for torchvision Mask R-CNN.
+    - image: [3,H,W] float tensor (ImageNet norm)
+    - target: dict with keys: boxes [N,4], labels [N], masks [N,H,W] uint8, image_id, area, iscrowd
+    """
+    def __init__(self, data_entries, img_size=512, imagenet_norm=True):
+        self.data = data_entries
+        self.img_size = int(img_size)
+
+        norm = [A.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])] if imagenet_norm else []
+        self.tf = A.Compose([A.Resize(self.img_size, self.img_size, interpolation=cv2.INTER_LINEAR)] + norm + [ToTensorV2()])
+
+    def __len__(self): 
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        entry = self.data[idx]
+        img_path = entry['filename']
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(img_path)
+
+        image = np.array(Image.open(img_path).convert("RGB"))
+        H0, W0 = entry['height'], entry['width']
+        assert image.shape[:2] == (H0, W0), "Image size mismatch with annotations"
+
+        # image transform to [3,H,W]
+        img_t = self.tf(image=image)['image'].float()
+
+        # decode and resize instance masks with NEAREST
+        masks0 = _decode_ann_masks(entry['annotations'], H0, W0)  # [N,H0,W0]
+        if masks0.shape[0] > 0:
+            masks_rs = np.stack([
+                cv2.resize(m.astype(np.uint8), (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+                for m in masks0
+            ], axis=0)
+        else:
+            masks_rs = masks0
+
+        boxes = _masks_to_boxes(masks_rs)                             # [N,4]
+        labels = np.ones((boxes.shape[0],), dtype=np.int64)           # 1 = "cell"
+        iscrowd = np.zeros_like(labels, dtype=np.int64)
+        area = (boxes[:,2]-boxes[:,0]).clip(min=0) * (boxes[:,3]-boxes[:,1]).clip(min=0)
+
+        target = {
+            "boxes": torch.as_tensor(boxes, dtype=torch.float32),
+            "labels": torch.as_tensor(labels, dtype=torch.int64),
+            "masks": torch.as_tensor(masks_rs, dtype=torch.uint8),
+            "image_id": torch.as_tensor([idx], dtype=torch.int64),
+            "area": torch.as_tensor(area, dtype=torch.float32),
+            "iscrowd": torch.as_tensor(iscrowd, dtype=torch.int64),
+        }
+        return img_t, target
+
+def maskrcnn_collate_fn(batch):
+    imgs, targets = zip(*batch)
+    return list(imgs), list(targets)
+
+# ---------------------- UNet semantic segmentation dataset ----------------------
+class LiveCellSemSegDataset(Dataset):
+    """
+    Returns (image_tensor, class_map) for semantic segmentation UNet with 2 logits (bg/cell).
+    - image: [3,H,W] float tensor (ImageNet norm)
+    - class_map: [H,W] long in {0,1}
+    """
+    def __init__(self, data_entries, img_size=512, imagenet_norm=True, num_classes=2):
+        assert num_classes >= 2, "For semantic UNet use num_classes >= 2 (bg/cell)."
+        self.data = data_entries
+        self.img_size = int(img_size)
+        self.num_classes = num_classes
+
+        norm = [A.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])] if imagenet_norm else []
+        self.tf = A.Compose([A.Resize(self.img_size, self.img_size, interpolation=cv2.INTER_LINEAR)] + norm + [ToTensorV2()])
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        entry = self.data[idx]
+        img_path = entry['filename']
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(img_path)
+
+        image = np.array(Image.open(img_path).convert("RGB"))
+        H0, W0 = entry['height'], entry['width']
+
+        img_t = self.tf(image=image)['image'].float()  # [3,H,W]
+
+        # decode instances and collapse to class map
+        masks0 = _decode_ann_masks(entry['annotations'], H0, W0)  # [N,H0,W0]
+        class_map = _instance_to_semantic(masks0, num_classes=self.num_classes)  # [H0,W0] in {0,1}
+
+        # resize with NEAREST to keep labels intact
+        class_map_rs = cv2.resize(class_map, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST).astype(np.uint8)
+        target = torch.from_numpy(class_map_rs).long()  # [H,W]
+        return img_t, target
+    
+
+def load_LiveCellDataSet(mode='train'):
+    if mode not in ['train', 'val', 'test']:
+        raise ValueError(f"Dataset mode '{mode}' is invalid. "
+            "Supported modes are: 'train', 'val' or 'test'.")
+    
+    dataset_dict = prepare_dataset(dataset_paths['path_to_original_dataset'], dataset_paths['path_to_livecell_images'], dataset_paths['path_to_labels'])
+    img_size = 224 if MODEL_NAME in ("ViT_Count", "ConvNeXt_Count") else 512
+    if MODEL_NAME == 'Mask_R_CNN_ResNet50':
+        dataset = LiveCellMaskRCNNDataset(dataset_dict[mode], img_size=img_size)
+    elif MODEL_NAME == 'Unet':
+        dataset = LiveCellSemSegDataset(dataset_dict[mode], img_size=img_size)
+    else:
+        dataset = LiveCellDataset(dataset_dict[mode], img_size=img_size)
+    
+    return dataset
+
 # -----------------------------------------
 # example
 # -----------------------------------------
 if __name__ == "__main__":
     path_to_original_dataset = "/home/meidanzehavi/livecell"
+    # /home/meidanzehavi/livecell_temp
     path_to_livecell_images = "/home/meidanzehavi/Cell_counter/livecell_dataset/images"
     path_to_labels = "/home/meidanzehavi/Cell_counter/livecell_dataset"
 

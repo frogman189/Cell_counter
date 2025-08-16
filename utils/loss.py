@@ -10,8 +10,8 @@ class CountLoss(nn.Module):
         self.mse = nn.MSELoss()
         self.mae = nn.L1Loss()
         
-    def forward(self, pred, target):
-        return 0.7 * self.mae(pred, target) + 0.3 * self.mse(pred, target)
+    def forward(self, pred, target, gt_count):
+        return 0.7 * self.mae(pred, gt_count) + 0.3 * self.mse(pred, gt_count)
 
 
 class CellCountingLoss(nn.Module):
@@ -80,7 +80,7 @@ class RegressionLoss(nn.Module):
         self.huber_delta = float(huber_delta)
         self.reduction = reduction
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, gt_count= None) -> torch.Tensor:
         target = target.to(pred.dtype)
 
         if self.loss_type == "poisson":
@@ -189,7 +189,7 @@ class CompoundSegLoss(nn.Module):
         self.wf = w_focal
         self.wd = w_dice
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, gt_count=None) -> torch.Tensor:
         return self.wf * self.focal(logits, targets) + self.wd * self.dice(logits, targets)
     
 

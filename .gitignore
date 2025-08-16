@@ -10,9 +10,10 @@ __pycache__/
 livecell_dataset/*
 my_scripts/*
 results/*
-environment.yaml
 optuna_trials/*
-lacss3-small-l
+benchmark_models/lacss3-small-l
+benchmark_models/LIVECell_anchor_free_model.pth
+centermask2/
 
 # Distribution / packaging
 .Python

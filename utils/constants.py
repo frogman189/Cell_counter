@@ -16,8 +16,8 @@ best_gpu = get_best_gpu()
 DEVICE = torch.device(f'cuda:{best_gpu}' if torch.cuda.is_available() else 'cpu')
 
 # Set model to run
-MODELS = ['Mask_R_CNN_ResNet50', 'Unet', 'YOLOv8', 'ViT_Count', 'ConvNeXt_Count', 'UNetDensity', 'DeepLabDensity', 'MicroCellUNet', 'CNNTransformerCounter', 'TransCrowdCounter']
-MODEL_NAME = 'TransCrowdCounter'
+MODELS = ['Mask_R_CNN_ResNet50', 'Unet', 'ViT_Count', 'ConvNeXt_Count', 'UNetDensity', 'DeepLabDensity', 'MicroCellUNet', 'CNNTransformerCounter']
+MODEL_NAME = 'MicroCellUNet'
 assert MODEL_NAME in MODELS
 
 model_args = {

@@ -7,12 +7,7 @@ import torch.nn.functional as F
 
 
 from utils.constants import MODEL_NAME, TIME
-from torchvision.models.detection import MaskRCNN_ResNet50_FPN_Weights, maskrcnn_resnet50_fpn
-from torchvision.models.segmentation import deeplabv3_resnet50
-from torchvision.models.segmentation import DeepLabV3_ResNet50_Weights
 from segmentation_models_pytorch import Unet
-from ultralytics import YOLO
-from instanseg import InstanSeg
 from torchvision.models.detection import maskrcnn_resnet50_fpn_v2, MaskRCNN_ResNet50_FPN_V2_Weights
 from torchvision.models.detection.rpn import AnchorGenerator
 import torchvision.models.segmentation as segmentation
@@ -101,23 +96,6 @@ def load_unet_model(num_classes: int = 2,
         in_ch = head[0].in_channels
         head[0] = nn.Conv2d(in_ch, num_classes, kernel_size=1, bias=True)
 
-    return model
-
-
-#Fine tune Yolo guide: https://docs.ultralytics.com/tasks/segment/ - maybe aviad can take this personly, can teach alot.
-#Important: expected input size: (B, 3, 640, 640)
-def load_yolov8_seg_model(num_classes=1, model_size="yolov8s-seg.pt"):
-    # Load pre-trained YOLOv8 segmentation model
-    model = YOLO(model_size)  # 'yolov8n-seg.pt', 'yolov8s-seg.pt', etc.
-    
-    # Update class count (1 class: "cell")
-    model.model.nc = num_classes
-    
-    # Optional: Freeze backbone (YOLOv8-specific)
-    for name, param in model.model.named_parameters():
-        if 'backbone' in name:
-            param.requires_grad = False
-    
     return model
 
 ### ---------------------------------- Density regression models -------------------------------- ###
@@ -412,8 +390,6 @@ def get_model():
         model = load_maskrcnn_ResNet50_model(num_classes=2)
     elif MODEL_NAME == "Unet":
         model = load_unet_model(num_classes=2)
-    elif MODEL_NAME == "YOLOv8":
-        model = load_yolov8_seg_model(num_classes=1)
     elif MODEL_NAME == "ViT_Count":
         model = ImageCountRegressor(backbone="vit_b_16", loss_type="huber") 
     elif MODEL_NAME == "ConvNeXt_Count":
