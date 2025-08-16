@@ -6,6 +6,15 @@ __pycache__/
 # C extensions
 *.so
 
+#
+livecell_dataset/*
+my_scripts/*
+results/*
+optuna_trials/*
+benchmark_models/lacss3-small-l
+benchmark_models/LIVECell_anchor_free_model.pth
+centermask2/
+
 # Distribution / packaging
 .Python
 build/
@@ -31,6 +40,7 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+*.vscode
 
 # Installer logs
 pip-log.txt

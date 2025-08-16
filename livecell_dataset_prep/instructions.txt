@@ -1,9 +1,20 @@
-fownload the 4 zip files from the url:  https://www.kaggle.com/datasets/markunys/livecell-dataset/data
-the 4 files are:    1. LIVECell_dataset_2021.zip
-                    2. livecell_annotations_train.json.zip
-                    3. livecell_annotations_val.json.zip
-                    4. livecell_annotations_test.json.zip
+Instructions for Preparing the LIVECell Dataset
 
-move the files to designated dir.
-Then edit the dirs pathes `extract_data.py`, all the edit that need to be done is in the main.
-then run the script `extract_data.py`
+1. Download the dataset
+    Go to https://www.kaggle.com/datasets/markunys/livecell-dataset/data and download the following four files:
+        1. LIVECell_dataset_2021.zip
+        2. livecell_annotations_train.json.zip
+        3. livecell_annotations_val.json.zip
+        4. livecell_annotations_test.json.zip
+
+2. Move the files
+    Place all four files into your designated working directory.
+
+3. Update script paths
+    Open the script `extract_data.py` and edit the dataset file paths inside the `main` function to match the directory where you placed the files.
+
+4. Run the script
+    Execute the script `extract_data.py`.
+    This will create a new directory containing:
+        - All extracted images
+        - A CSV file with image information
