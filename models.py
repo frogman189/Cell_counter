@@ -9,6 +9,8 @@ import torch.nn.functional as F
 from utils.constants import MODEL_NAME, TIME
 from segmentation_models_pytorch import Unet
 from torchvision.models.detection import maskrcnn_resnet50_fpn_v2, MaskRCNN_ResNet50_FPN_V2_Weights
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from torchvision.models.detection.rpn import AnchorGenerator
 import torchvision.models.segmentation as segmentation
 from torchvision.models import vit_b_16, ViT_B_16_Weights, convnext_small, ConvNeXt_Small_Weights
@@ -47,30 +49,56 @@ def calculate_trainable(model):
 
 
 
+# def load_maskrcnn_ResNet50_model(num_classes: int):
+#     weights = MaskRCNN_ResNet50_FPN_V2_Weights.COCO_V1
+
+#     # Build with default internals (including its own RPN anchor generator)
+#     model = maskrcnn_resnet50_fpn_v2(
+#         weights=weights,
+#         box_score_thresh=0.05,
+#         trainable_backbone_layers=3,
+#     )
+
+#     # Swap to smaller anchors but keep A=3 (1 size per FPN level × 3 ratios)
+#     # FPN has 5 levels → provide 5 tuples (one per level)
+#     anchor_generator = AnchorGenerator(
+#         sizes=((16,), (32,), (64,), (128,), (256,)),
+#         aspect_ratios=(0.5, 1.0, 2.0),
+#     )
+#     model.rpn.anchor_generator = anchor_generator  # safe because A unchanged
+
+#     # Replace heads for your number of classes (incl. background)
+#     in_features = model.roi_heads.box_predictor.cls_score.in_features
+#     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+
+#     in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
+#     model.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask, 256, num_classes)
+
+#     return model
+
+
+
 def load_maskrcnn_ResNet50_model(num_classes: int):
     weights = MaskRCNN_ResNet50_FPN_V2_Weights.COCO_V1
-    # Smaller anchors help nuclei/cell scales; tune sizes to your pixel scale
-    anchor_generator = AnchorGenerator(
-        sizes=((16, 32, 64, 128),),           # try (8,16,32,64) if cells are tiny
-        aspect_ratios=((0.5, 1.0, 2.0),)
-    )
+    model = maskrcnn_resnet50_fpn_v2(weights=weights)
 
-    model = maskrcnn_resnet50_fpn_v2(
-        weights=weights,
-        rpn_anchor_generator=anchor_generator,
-        box_score_thresh=0.05,               # keep low during training; raise at eval
-        trainable_backbone_layers=3          # 3–5; more layers = more finetuning, more compute
+    # --- set smaller anchors post-hoc (5 FPN levels expected) ---
+    # Try smaller sizes for small cells; adjust if needed
+    anchor_generator = AnchorGenerator(
+        sizes=((8,), (16,), (32,), (64,), (128,)),          # one size per FPN level
+        aspect_ratios=((0.5, 1.0, 2.0),) * 5               # replicate per level
     )
+    model.rpn.anchor_generator = anchor_generator
 
     # Replace heads for your num_classes (incl. background)
     in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(
+    model.roi_heads.box_predictor = FastRCNNPredictor(
         in_features, num_classes
     )
 
     in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
     hidden_layer = 256
-    model.roi_heads.mask_predictor = torchvision.models.detection.mask_rcnn.MaskRCNNPredictor(
+    model.roi_heads.mask_predictor = MaskRCNNPredictor(
         in_features_mask, hidden_layer, num_classes
     )
     return model
@@ -131,54 +159,44 @@ class DeepLabDensity(nn.Module):
 
 
 class MicroAttentionBlock(nn.Module):
-    """Multi-scale attention block for micro-cell features"""
     def __init__(self, channels):
         super().__init__()
         self.channel_att = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(channels, channels//8, 1),
+            nn.Conv2d(channels, max(1, channels // 8), 1),
             nn.ReLU(),
-            nn.Conv2d(channels//8, channels, 1),
+            nn.Conv2d(max(1, channels // 8), channels, 1),
             nn.Sigmoid()
         )
         self.spatial_att = nn.Sequential(
             nn.Conv2d(channels, 1, 1),
             nn.Sigmoid()
         )
-        
     def forward(self, x):
-        channel_att = self.channel_att(x)
-        spatial_att = self.spatial_att(x)
-        return x * channel_att * spatial_att
-
-
+        return x * self.channel_att(x) * self.spatial_att(x)
 
 class MicroCellUNet(nn.Module):
     def __init__(self):
         super().__init__()
-        # 1. Encoder with ResNet50 (unchanged)
         self.encoder = get_encoder(
             name='resnet50',
             in_channels=3,
             depth=5,
             weights='imagenet'
         )
-        
-        # 2. High-resolution branch (unchanged)
+
         self.hr_branch = nn.Sequential(
             nn.Conv2d(3, 64, 3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             MicroAttentionBlock(64),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),
+            nn.Conv2d(64, 128, 3, stride=2, padding=1),  # -> H/2, W/2
             nn.BatchNorm2d(128),
             nn.ReLU()
         )
-        
-        # 3. Fixed Decoder Initialization
+
         self.decoder = self._create_decoder()
-        
-        # 4. Original prediction heads (unchanged)
+
         self.density_head = nn.Sequential(
             nn.Conv2d(16 + 128, 64, 3, padding=1),
             MicroAttentionBlock(64),
@@ -186,7 +204,7 @@ class MicroCellUNet(nn.Module):
             nn.ReLU(),
             nn.Conv2d(32, 1, 1)
         )
-        
+
         self.count_refiner = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
@@ -194,17 +212,11 @@ class MicroCellUNet(nn.Module):
             nn.ReLU(),
             nn.Linear(512, 1)
         )
-        
+
         self.scale = nn.Parameter(torch.tensor(1.0))
 
     def _create_decoder(self):
-        """Version-compatible decoder creation"""
-        
-        
-        # Get encoder channels from the encoder
         encoder_channels = self.encoder.out_channels
-        
-        # Try modern SMP version first
         try:
             return UnetDecoder(
                 encoder_channels=encoder_channels,
@@ -212,7 +224,6 @@ class MicroCellUNet(nn.Module):
                 n_blocks=5,
                 attention_type='scse'
             )
-        # Fallback for older versions
         except TypeError:
             return UnetDecoder(
                 encoder_channels=encoder_channels,
@@ -221,20 +232,37 @@ class MicroCellUNet(nn.Module):
                 attention_type='scse'
             )
 
-    def forward(self, x):
-        # Original forward pass (unchanged)
-        hr_features = self.hr_branch(x)
-        enc_features = self.encoder(x)
-        dec_features = self.decoder(*enc_features)
-        
-        dec_features = F.interpolate(dec_features, scale_factor=2, mode='bilinear')
-        fused = torch.cat([dec_features, hr_features], dim=1)
-        
-        density = F.relu(self.density_head(fused))
-        count_adjust = self.count_refiner(enc_features[-1]).sigmoid()
-        
-        return density * self.scale * (1 + count_adjust)
+    def _decode(self, enc_features):
+        """Call decoder compatibly across SMP versions."""
+        try:
+            return self.decoder(*enc_features)
+        except TypeError:
+            return self.decoder(enc_features)
 
+    def forward(self, x):
+        hr_features = self.hr_branch(x)          # [B,128,H/2,W/2]
+        enc_features = self.encoder(x)
+
+        # decoder (API-robust call)
+        try:
+            dec_features = self.decoder(*enc_features)
+        except TypeError:
+            dec_features = self.decoder(enc_features)
+
+        if dec_features.shape[-2:] != hr_features.shape[-2:]:
+            dec_features = F.interpolate(dec_features, size=hr_features.shape[-2:], mode='bilinear', align_corners=False)
+
+        fused = torch.cat([dec_features, hr_features], dim=1)   # [B,16+128,H/2,W/2]
+        density = F.relu(self.density_head(fused))              # [B,1,H/2,W/2]
+        if density.shape[-2:] != x.shape[-2:]:
+            density = F.interpolate(density, size=x.shape[-2:], mode='bilinear', align_corners=False)  # [B,1,H,W]
+
+        count_adjust = self.count_refiner(enc_features[-1]).sigmoid()   # [B,1]
+        count_adjust = count_adjust.unsqueeze(-1).unsqueeze(-1)         # [B,1,1,1]
+        # (optional) keep dtypes aligned:
+        count_adjust = count_adjust.to(density.dtype)
+
+        return density * self.scale * (1 + count_adjust)
 
 
 
@@ -288,7 +316,8 @@ class ImageCountRegressor(nn.Module):
             m = convnext_small(weights=ConvNeXt_Small_Weights.IMAGENET1K_V1)
             in_dim = m.classifier[-1].in_features
             m.classifier = nn.Sequential(
-                m.classifier[0],                 # LayerNorm
+                nn.Flatten(1),                    # <— missing before
+                nn.LayerNorm(in_dim, eps=1e-6),
                 nn.Linear(in_dim, in_dim // 2),
                 nn.ReLU(inplace=True),
                 nn.Dropout(0.1),

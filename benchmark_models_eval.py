@@ -1,20 +1,30 @@
-import os, glob
+import os, glob, sys
 import torch
 import numpy as np
 from torch.utils.data import DataLoader
 
 from cellpose import models
+import cellpose
+from importlib.metadata import version as _pkgver
+try:
+    _CPVER = _pkgver("cellpose")
+except Exception:
+    _CPVER = "0.0.0"
+_CP_MAJOR = int(_CPVER.split(".")[0]) if _CPVER and _CPVER[0].isdigit() else 0
+
+
 from utils.metrics import calculate_counting_metrics, print_metrics
 from preprocess import prepare_dataset, LiveCellDataset
-from utils.constants import MODEL_NAME, dataset_paths, train_cfg, DEVICE
-
-from detectron2.config import get_cfg
-from detectron2.engine import DefaultPredictor
-from detectron2.structures import Instances
-from centermask2.centermask.config import get_cfg
+from utils.constants import MODEL_NAME, dataset_paths, DEVICE
 
 # Get the directory where the script is located
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "centermask2"))
+
+from detectron2.engine import DefaultPredictor
+from detectron2.structures import Instances
+from centermask2.centermask.config import get_cfg
 
 # ================== CONFIG ==================
 EVAL_MODEL = "centermask2"      # "lacss" or "cellpose" or "centermask2"
@@ -58,13 +68,16 @@ def make_loader(test_split: bool):
     )
     split_name = 'test' if test_split else 'val'
     img_size = 224 if MODEL_NAME in ("ViT_Count", "ConvNeXt_Count") else 512
-    dataset = LiveCellDataset(dataset_dict[split_name], img_size=img_size)
+    eval_name = EVAL_MODEL.lower()
+    normalize = False if eval_name in ("cellpose") else True
+
+    dataset = LiveCellDataset(dataset_dict[split_name], img_size=img_size, normalize=normalize)
     loader = DataLoader(
         dataset,
-        batch_size=train_cfg['batch_size'],
+        batch_size=32,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=train_cfg['num_workers'],
+        num_workers=8,
         pin_memory=True if DEVICE == 'cuda' else False,
     )
     return loader
@@ -396,6 +409,10 @@ def evaluate_lacss(val_loader,
     return metrics
 
 
+
+# ================== CELLPOSE ==================
+
+
 def _build_cellpose(model_type: str, use_gpu: bool):
     """Construct Cellpose model for both old (Cellpose) and new (CellposeModel) versions."""
     gpu_flag = (use_gpu and torch.cuda.is_available())
@@ -405,18 +422,34 @@ def _build_cellpose(model_type: str, use_gpu: bool):
         return models.CellposeModel(model_type=model_type, gpu=gpu_flag) # >= 3.x
 
 
-def _cellpose_eval(cp, np_img, channels, diameter):
-    """
-    Call cp.eval across versions and return masks.
-    """
-    try:
-        result = cp.eval(np_img, channels=channels, diameter=diameter, augment=False, batch_size=1)
-    except TypeError:
-        result = cp.eval(np_img, channels=channels, diameter=diameter, net_avg=True, augment=False, batch_size=1)
+def _shape_with_channels(arr):
+    return arr.shape if arr.ndim == 3 else (arr.shape[0], arr.shape[1], 1)
 
-    masks = result[0] if isinstance(result, (list, tuple)) else result
-    if isinstance(masks, list):  # sometimes batched returns are lists
-        masks = masks[0]
+
+def _cellpose_eval(cp, np_img, channels, diameter, _debug_once=[]):
+    # one-time debug print
+    if not _debug_once:
+        print(f"[Cellpose] v{_CPVER} | np_img shape={_shape_with_channels(np_img)} "
+              f"| dtype={np_img.dtype} | min={np_img.min()} | max={np_img.max()}")
+        print(f"[Cellpose] channels arg will be {'USED' if _CP_MAJOR<4 else 'IGNORED'}: {channels}")
+        _debug_once.append(True)
+
+    # v4+: do NOT pass channels; v2/v3: pass it
+    kwargs = dict(diameter=diameter, augment=False, batch_size=1)
+    if _CP_MAJOR < 4:
+        kwargs["channels"] = channels
+
+    result = cp.eval(np_img, **kwargs)
+
+    # coerce result to masks
+    if isinstance(result, dict):
+        masks = result.get("masks", result.get("labels"))
+    elif isinstance(result, (list, tuple)):
+        masks = result[0] if len(result) else None
+        if isinstance(masks, (list, tuple)):  # batched
+            masks = masks[0] if len(masks) else None
+    else:
+        masks = result
     return masks
 
 

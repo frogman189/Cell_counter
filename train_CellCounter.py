@@ -31,13 +31,15 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
 
 def collate_fn(batch):
     if MODEL_NAME == 'Mask_R_CNN_ResNet50':
-        images, targets = zip(*batch)   # each: image [3,H,W], target dict
-        return list(images), list(targets), None
+        images, targets, cell_counts = zip(*batch)   # each: image [3,H,W], target dict
+        cell_counts = torch.tensor(cell_counts, dtype=torch.float32)
+        return list(images), list(targets), cell_counts
     elif MODEL_NAME == 'Unet':
-        images, class_maps = zip(*batch)              # image [3,H,W], target [H,W] (long)
+        images, class_maps, cell_counts = zip(*batch)              # image [3,H,W], target [H,W] (long)
         images = torch.stack(images, dim=0)           # [B,3,H,W]
         class_maps = torch.stack(class_maps, dim=0)   # [B,H,W]
-        return images, class_maps, None
+        cell_counts = torch.tensor(cell_counts, dtype=torch.float32)
+        return images, class_maps, cell_counts
     else:
         images, density_maps, cell_counts = zip(*batch)
         images = torch.stack(images, 0)
@@ -155,8 +157,10 @@ def validate_epoch(model, val_loader, criterion, device, *,
                     all_pred_counts.append(pred_c)
 
                 # GT counts from targets' instance labels
-                for t in targets:
-                    all_gt_counts.append(int(t['labels'].shape[0]))
+                # for t in targets:
+                #     all_gt_counts.append(int(t['labels'].shape[0]))
+                if counts is not None:
+                    all_gt_counts.extend(counts.detach().cpu().numpy().tolist())
 
                 # no validation loss here for detection (native losses require train-mode forward)
 
@@ -164,6 +168,7 @@ def validate_epoch(model, val_loader, criterion, device, *,
                 # images: [B,3,H,W], targets: class map [B,H,W], cell_counts: None
                 images = images.to(device).float()
                 class_maps = targets.to(device).long()
+                counts = cell_counts.to(device) if cell_counts is not None else None
 
                 logits = model(images)  # [B,C,H,W]
                 if criterion is not None:
@@ -182,17 +187,19 @@ def validate_epoch(model, val_loader, criterion, device, *,
                     all_pred_counts.append(int(max(n - 1, 0)))
 
                 # GT count from class map (same rule)
-                cm_np = class_maps.cpu().numpy().astype(np.uint8)
-                for cm in cm_np:
-                    n, _ = cv2.connectedComponents((cm > 0).astype(np.uint8), connectivity=8)
-                    all_gt_counts.append(int(max(n - 1, 0)))
+                # cm_np = class_maps.cpu().numpy().astype(np.uint8)
+                # for cm in cm_np:
+                #     n, _ = cv2.connectedComponents((cm > 0).astype(np.uint8), connectivity=8)
+                #     all_gt_counts.append(int(max(n - 1, 0)))
+                if counts is not None:
+                    all_gt_counts.extend(counts.detach().cpu().numpy().tolist())
 
             else:
                 # Density / count models
                 # images: [B,3,H,W], targets: density [B,1,H,W] (or dummy), cell_counts: [B] or None
-                images = images.to(device).float()
-                dens_or_target = targets.to(device).float() if targets is not None else None
-                counts = cell_counts.to(device).float() if cell_counts is not None else None
+                images = images.to(device)
+                dens_or_target = targets.to(device) if targets is not None else None
+                counts = cell_counts.to(device) if cell_counts is not None else None
 
                 preds = model(images)  # density map [B,1,H,W] OR counts [B]
 
@@ -252,7 +259,7 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
     #scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_training_steps)
 
     if MODEL_NAME != 'Mask_R_CNN_ResNet50':
-        criterion = select_loss()
+        criterion = select_loss(train_cfg)
     else:
         criterion=None
 
@@ -335,13 +342,14 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
 
 
 def main():
-    train_dataset = load_LiveCellDataSet(mode='train')
-    val_dataset   = load_LiveCellDataSet(mode='val')
+
 
     try:
         model = get_model()
         model.to(DEVICE)
-        train(model, train_dataset, val_dataset, train_cfg, DEVICE)
+        train_dataset = load_LiveCellDataSet(mode='train')
+        val_dataset   = load_LiveCellDataSet(mode='val')
+        train(model, train_dataset, val_dataset, train_cfg[MODEL_NAME], DEVICE)
 
     finally:
         # Free GPU memory
