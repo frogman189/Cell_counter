@@ -41,32 +41,24 @@ def calculate_counting_metrics(predictions, ground_truths, thresholds):
 
 
 def print_metrics(metrics: dict,
-                         split: str = "val",
-                         model: str | None = None,
-                         n_images: int | None = None,
-                         decimals: int = 3,
-                         show_rmse: bool = False) -> None:
+                  split: str = "val",
+                  model: str | None = None,
+                  n_images: int | None = None,
+                  decimals: int = 3,
+                  show_rmse: bool = False) -> None:
     """
     Nicely print the dict returned by calculate_counting_metrics(...).
-
-    Args:
-        metrics: dict with keys 'mse','mae','mean_pred','mean_gt', and acc_thresh_*.
-        split:   "val" or "test" (for the header).
-        model:   Optional model name for the header.
-        n_images:If known, number of evaluated images (for context).
-        decimals:Number of decimals for MSE/MAE/means.
-        show_rmse:Also display RMSE (= sqrt(MSE)).
     """
     import math
 
     title_bits = [f"Results — {split}"]
-    if model: title_bits.insert(0, model)
+    if model:
+        title_bits.insert(0, model)
     title = " | ".join(title_bits)
     bar = "-" * len(title)
 
     def fmt(x): return f"{x:.{decimals}f}"
 
-    # Base lines
     lines = [title, bar]
     lines.append(f"MSE: {fmt(metrics['mse'])}   MAE: {fmt(metrics['mae'])}")
     if show_rmse:
@@ -78,17 +70,28 @@ def print_metrics(metrics: dict,
     if n_images is not None:
         lines.append(f"Images: {n_images}")
 
-    # Threshold block (e.g., acc_thresh_0, acc_thresh_1, ...)
+    # --- Aligned threshold table (.2f for percentages) ---
     thr_pairs = sorted(
-        ((int(k.rsplit("_", 1)[-1]), v) for k, v in metrics.items() if k.startswith("acc_thresh_")),
+        ((int(k.rsplit("_", 1)[-1]), float(v)) for k, v in metrics.items() if k.startswith("acc_thresh_")),
         key=lambda x: x[0]
     )
     if thr_pairs:
-        header = "  ".join([f"±{t:>3}" for t, _ in thr_pairs])
-        values = "  ".join([f"{v:>5.1f}%" for _, v in thr_pairs])
-        lines.append("Acc @ thresholds")
-        lines.append(header)
-        lines.append(values)
+        headers = [f"±{t}" for t, _ in thr_pairs]
+        values  = [f"{v:.2f}%" for _, v in thr_pairs]  # <-- .2f here
+
+        # ensure columns are wide enough for '100.00%' (7 chars) or header, whichever is longer
+        min_col = 7
+        widths = [max(len(h), len(val), min_col) for h, val in zip(headers, values)]
+        sep = " | "
+
+        header_row = sep.join(h.center(w) for h, w in zip(headers, widths))
+        divider    = sep.join("-" * w     for w in widths)
+        value_row  = sep.join(val.rjust(w) for val, w in zip(values, widths))
+
+        lines.append("\nAcc @ thresholds")
+        lines.append(header_row)
+        lines.append(divider)
+        lines.append(value_row)
     else:
         lines.append("Acc @ thresholds: N/A")
 

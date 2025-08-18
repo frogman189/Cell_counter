@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics.image import StructuralSimilarityIndexMeasure
-from utils.constants import MODEL_NAME
+from utils.constants import MODEL_NAME, DEVICE
 
 class CountLoss(nn.Module):
     def __init__(self):
@@ -81,12 +81,12 @@ class RegressionLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor, gt_count= None) -> torch.Tensor:
-        target = target.to(pred.dtype)
+        gt_count = gt_count.to(pred.dtype)
 
         if self.loss_type == "poisson":
             # Expect pred to be positive λ (e.g., Softplus in the model)
             return F.poisson_nll_loss(
-                pred, target,
+                pred, gt_count,
                 log_input=False,  # we pass λ, not log λ
                 full=True,        # includes Stirling term for large counts
                 reduction=self.reduction
@@ -94,7 +94,7 @@ class RegressionLoss(nn.Module):
 
         # Default: Smooth L1 (Huber)
         return F.smooth_l1_loss(
-            pred, target,
+            pred, gt_count,
             beta=self.huber_delta,
             reduction=self.reduction
         )
@@ -201,11 +201,11 @@ def select_loss(train_cfg):
     elif MODEL_NAME == "ConvNeXt_Count":
         criterion = RegressionLoss()
     elif MODEL_NAME == "UNetDensity":
-        criterion = CellCountingLoss()
+        criterion = CellCountingLoss().to(DEVICE)
     elif MODEL_NAME == 'DeepLabDensity':
-        criterion = CellCountingLoss()
+        criterion = CellCountingLoss().to(DEVICE)
     elif MODEL_NAME == "MicroCellUNet":
-        criterion = CellCountingLoss()
+        criterion = CellCountingLoss().to(DEVICE)
     elif MODEL_NAME == 'CNNTransformerCounter':
         criterion = CountLoss()
 

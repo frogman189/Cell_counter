@@ -151,20 +151,19 @@ def _compute_centroids_from_annotations(anns, H, W):
 # dataset 
 # -----------------------------------------
 class LiveCellDataset(Dataset):
-    def __init__(self, data_entries, img_size=512, imagenet_norm=True):
+    def __init__(self, data_entries, img_size=512,
+                 normalize: bool = True,
+                 mean=(0.485, 0.456, 0.406),
+                 std=(0.229, 0.224, 0.225)):
         self.data = data_entries
-        self.img_size = img_size
-        if imagenet_norm:
-            self.transforms = A.Compose([
-                A.Resize(img_size, img_size, interpolation=cv2.INTER_LINEAR),
-                A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-                ToTensorV2(),
-            ])
-        else:
-            self.transforms = A.Compose([
-                A.Resize(img_size, img_size, interpolation=cv2.INTER_LINEAR),
-                ToTensorV2(),
-            ])
+        self.img_size = int(img_size)
+
+        tfms = [A.Resize(self.img_size, self.img_size, interpolation=cv2.INTER_LINEAR)]
+        if normalize:
+            tfms.append(A.Normalize(mean=mean, std=std))
+        tfms.append(ToTensorV2())
+
+        self.transforms = A.Compose(tfms)
 
     def __len__(self):
         return len(self.data)
@@ -236,6 +235,22 @@ def _decode_ann_masks(anns, H, W):
         return np.zeros((0, H, W), dtype=np.uint8)
     return np.stack(ms, axis=0)
 
+# def _masks_to_boxes(msk):
+#     """Compute xyxy boxes from binary masks. msk: [N,H,W] uint8."""
+#     if msk.shape[0] == 0:
+#         return np.zeros((0, 4), dtype=np.float32)
+#     N, H, W = msk.shape
+#     boxes = np.zeros((N, 4), dtype=np.float32)
+#     for i in range(N):
+#         ys, xs = np.where(msk[i] > 0)
+#         if xs.size == 0:
+#             boxes[i] = 0
+#         else:
+#             x1, y1 = xs.min(), ys.min()
+#             x2, y2 = xs.max(), ys.max()
+#             boxes[i] = [x1, y1, x2, y2]
+#     return boxes
+
 def _masks_to_boxes(msk):
     """Compute xyxy boxes from binary masks. msk: [N,H,W] uint8."""
     if msk.shape[0] == 0:
@@ -245,10 +260,14 @@ def _masks_to_boxes(msk):
     for i in range(N):
         ys, xs = np.where(msk[i] > 0)
         if xs.size == 0:
-            boxes[i] = 0
+            boxes[i] = 0  # (rare: empty mask after resize; see option B to avoid)
         else:
             x1, y1 = xs.min(), ys.min()
-            x2, y2 = xs.max(), ys.max()
+            # half-open [x1, y1, x2, y2) so width/height >= 1 px
+            x2, y2 = xs.max() + 1, ys.max() + 1
+            # clip to image bounds
+            if x2 > W: x2 = W
+            if y2 > H: y2 = H
             boxes[i] = [x1, y1, x2, y2]
     return boxes
 
@@ -315,7 +334,7 @@ class LiveCellMaskRCNNDataset(Dataset):
             "area": torch.as_tensor(area, dtype=torch.float32),
             "iscrowd": torch.as_tensor(iscrowd, dtype=torch.int64),
         }
-        return img_t, target
+        return img_t, target, torch.tensor(entry['cell_count'], dtype=torch.float32)
 
 def maskrcnn_collate_fn(batch):
     imgs, targets = zip(*batch)
@@ -358,7 +377,7 @@ class LiveCellSemSegDataset(Dataset):
         # resize with NEAREST to keep labels intact
         class_map_rs = cv2.resize(class_map, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST).astype(np.uint8)
         target = torch.from_numpy(class_map_rs).long()  # [H,W]
-        return img_t, target
+        return img_t, target, torch.tensor(entry['cell_count'], dtype=torch.float32)
     
 
 def load_LiveCellDataSet(mode='train'):
