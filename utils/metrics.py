@@ -1,6 +1,7 @@
 import os
 import matplotlib.pyplot as plt
 import numpy as np
+import math
 from typing import Dict, List
 from scipy.ndimage import label as connected_components
 
@@ -49,8 +50,7 @@ def print_metrics(metrics: dict,
     """
     Nicely print the dict returned by calculate_counting_metrics(...).
     """
-    import math
-
+    
     title_bits = [f"Results — {split}"]
     if model:
         title_bits.insert(0, model)

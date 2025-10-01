@@ -17,7 +17,18 @@ TEST = True  # True -> evaluate 'test', False -> evaluate 'val'
 
 
 def find_best_checkpoint(run_dir: str) -> str:
-    """Return the most recent best_model_*.pt under run_dir/model_weights/"""
+    """
+    Find the most recent best model checkpoint file.
+    
+    Args:
+        run_dir: Directory containing model checkpoints
+        
+    Returns:
+        str: Path to the most recent best model checkpoint
+        
+    Raises:
+        FileNotFoundError: If no checkpoint files are found
+    """
     mw_dir = os.path.join(run_dir, "model_weights")
     pattern = os.path.join(mw_dir, "best_model_*.pt")
     candidates = glob.glob(pattern)
@@ -29,7 +40,15 @@ def find_best_checkpoint(run_dir: str) -> str:
 
 
 def load_saved_cfg_into(run_dir: str):
-    """Load model_weights/config.json and merge into train_cfg (dict or namespace)."""
+    """
+    Load saved configuration from model training.
+    
+    Args:
+        run_dir: Directory containing model configuration
+        
+    Returns:
+        dict: Model configuration dictionary, or None if loading fails
+    """
     config_path = os.path.join(run_dir, "model_weights", "config.json")
     if not os.path.exists(config_path):
         print(f"[Eval] No config.json found at {config_path}; using current train_cfg as-is.")
@@ -87,6 +106,15 @@ def load_saved_cfg_into(run_dir: str):
 #     print(report)
 
 def write_eval_report(split, metrics, dt, out_path):
+    """
+    Write evaluation results to a formatted report file.
+    
+    Args:
+        split: Dataset split being evaluated ('test' or 'val')
+        metrics: Dictionary containing evaluation metrics
+        dt: Evaluation time in seconds
+        out_path: Output file path for the report
+    """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # thresholds → [(thr, acc), ...]
@@ -144,6 +172,21 @@ def write_eval_report(split, metrics, dt, out_path):
 
 @torch.no_grad()
 def evaluate_split(model, loader, device, criterion):
+    """
+    Evaluates the model on a given data loader split (validation or test).
+    
+    Calculates the average loss, predicted counts, and various counting metrics.
+    
+    Args:
+        model (torch.nn.Module): The density map prediction model.
+        loader (torch.utils.data.DataLoader): Data loader for the split to evaluate.
+        device (torch.device): The device (CPU/GPU) to run the evaluation on.
+        criterion (torch.nn.Module): The loss function (used for reporting the average loss).
+        
+    Returns:
+        dict: A dictionary containing evaluation metrics including loss, num_images, 
+              mean_pred_raw, MAE, MSE, and accuracy thresholds.
+    """
     model.eval()
     total_loss = 0.0
     n_batches = 0
@@ -163,11 +206,13 @@ def evaluate_split(model, loader, device, criterion):
         n_batches += 1
 
         # predicted counts = sum of density
+        # Calculates the total predicted count by summing all elements in the density map for each image.
         pred_counts = pred_density.sum(dim=(1, 2, 3)).cpu().tolist()
         all_pred_counts.extend(pred_counts)
         all_gt_counts.extend(gt_counts.cpu().tolist())
 
     # same rounding as training
+    # Rounds the raw float predictions before calculating the counting metrics (MAE, MSE, Acc).
     metrics = calculate_counting_metrics(
         [int(round(x)) for x in all_pred_counts],
         [int(x) for x in all_gt_counts],
@@ -179,7 +224,14 @@ def evaluate_split(model, loader, device, criterion):
     return metrics
 
 
+
 def main():
+    """
+    Main function to orchestrate the evaluation process.
+    
+    Loads the best model checkpoint and configuration, sets up the evaluation 
+    dataset and loader, runs the evaluation, and saves the final report.
+    """
     # ---------- paths & checkpoint ----------
     run_dir = model_pathes[MODEL_NAME]
     ckpt_path = find_best_checkpoint(run_dir)
@@ -188,9 +240,11 @@ def main():
     # ---------- data ----------
     dataset_dict = prepare_dataset(dataset_paths['path_to_original_dataset'], dataset_paths['path_to_livecell_images'], dataset_paths['path_to_labels'])
     split = "test" if TEST else "val"
+    # Image size depends on the specific model architecture being used.
     img_size = 224 if MODEL_NAME in ("ViT_Count", "ConvNeXt_Count") else 512
     eval_dataset = LiveCellDataset(dataset_dict[split], img_size=img_size)
 
+    # Sets up the DataLoader with parameters loaded from the training configuration.
     eval_loader = DataLoader(eval_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=train_cfg['num_workers'], pin_memory=True if str(DEVICE).startswith("cuda") else False, collate_fn=collate_fn)
 
     # ---------- model ----------

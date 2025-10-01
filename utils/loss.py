@@ -15,7 +15,7 @@ class CountLoss(nn.Module):
 
 
 class CellCountingLoss(nn.Module):
-    def __init__(self, w_density=1.0, w_count=0.3, w_ssim=0.5):
+    def __init__(self, w_density=1.0, w_count=0.5, w_ssim=0.5):
         super().__init__()
         self.w_density = w_density
         self.w_count = w_count
@@ -197,15 +197,15 @@ def select_loss(train_cfg):
     if MODEL_NAME == "Unet":
         criterion = CompoundSegLoss()
     elif MODEL_NAME == "ViT_Count":
-        criterion = RegressionLoss()
+        criterion = RegressionLoss(huber_delta=train_cfg['huber_delta'])
     elif MODEL_NAME == "ConvNeXt_Count":
-        criterion = RegressionLoss()
+        criterion = RegressionLoss(huber_delta=train_cfg['huber_delta'])
     elif MODEL_NAME == "UNetDensity":
-        criterion = CellCountingLoss().to(DEVICE)
+        criterion = CellCountingLoss(w_density=train_cfg['w_density'], w_ssim=train_cfg['w_ssim']).to(DEVICE)
     elif MODEL_NAME == 'DeepLabDensity':
-        criterion = CellCountingLoss().to(DEVICE)
+        criterion = CellCountingLoss(w_density=train_cfg['w_density'], w_ssim=train_cfg['w_ssim']).to(DEVICE)
     elif MODEL_NAME == "MicroCellUNet":
-        criterion = CellCountingLoss().to(DEVICE)
+        criterion = CellCountingLoss(w_density=train_cfg['w_density'], w_ssim=train_cfg['w_ssim']).to(DEVICE)
     elif MODEL_NAME == 'CNNTransformerCounter':
         criterion = CountLoss()
 

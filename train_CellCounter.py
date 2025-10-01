@@ -49,14 +49,28 @@ def collate_fn(batch):
 
 
 def train_cfg_for_optuna(trial, train_cfg):
-    lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)  # log=True, will use log scale to interplolate between lr
-    weight_count = trial.suggest_float("weight_count", 0.0, 1.2, step=0.1)
-    batch_size = trial.suggest_categorical("batch_size", [8, 16, 32])
+    lr = trial.suggest_float("lr", 1e-5, 1e-4, log=True)  # log=True, will use log scale to interplolate between lr
+
+    # Mask_R_CNN_ResNet50: smaller batch sizes due to memory
+    if MODEL_NAME == 'Mask_R_CNN_ResNet50':
+        batch_size = trial.suggest_categorical("batch_size", [2, 4, 8])
+    else:
+        batch_size = trial.suggest_categorical("batch_size", [4, 8, 16, 32, 64])
+
+
+    if MODEL_NAME in {'UNetDensity', 'DeepLabDensity', 'MicroCellUNet'}:
+        weight_density = trial.suggest_float("weight_density", 0.5, 2.0, step=0.1)
+        weight_ssim = trial.suggest_float("weight_ssim", 0.6, 2.0, step=0.1)
+        train_cfg['w_density'] = weight_density
+        train_cfg['w_ssim'] = weight_ssim
+
+    if MODEL_NAME in {'ConvNeXt_Count', 'ViT_Count'}:
+        huber_delta = trial.suggest_float("huber_delta", 0.0, 10.0, step=0.5)
+        train_cfg['huber_delta'] = huber_delta
 
     train_cfg['learning_rate'] = lr
-    train_cfg['w_count'] = weight_count
     train_cfg['batch_size'] = batch_size
-    train_cfg['num_epochs'] = 10
+    train_cfg['num_epochs'] = 10 # keep short for optuna trials
     return train_cfg
 
 
@@ -145,6 +159,11 @@ def validate_epoch(model, val_loader, criterion, device, *,
             if MODEL_NAME == 'Mask_R_CNN_ResNet50':
                 # images: list[tensor], targets: list[dict], cell_counts: None
                 images = [img.to(device).float() for img in images]
+                targets = [
+                    {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()}
+                    for t in targets
+                ]
+                counts = cell_counts.to(device) if cell_counts is not None else None
 
                 # predictions (eval path)
                 outputs = model(images)  # list of dicts
@@ -161,6 +180,9 @@ def validate_epoch(model, val_loader, criterion, device, *,
                 #     all_gt_counts.append(int(t['labels'].shape[0]))
                 if counts is not None:
                     all_gt_counts.extend(counts.detach().cpu().numpy().tolist())
+            
+                loss_dict = model(images, targets)      # torchvision returns dict of losses in train()
+                loss = sum(loss_dict.values())
 
                 # no validation loss here for detection (native losses require train-mode forward)
 
@@ -198,6 +220,9 @@ def validate_epoch(model, val_loader, criterion, device, *,
                 # Density / count models
                 # images: [B,3,H,W], targets: density [B,1,H,W] (or dummy), cell_counts: [B] or None
                 images = images.to(device)
+                mn = images.amin().detach().cpu().item()
+                mx = images.amax().detach().cpu().item()
+                print(f"batch min={mn:.4f}, max={mx:.4f}")
                 dens_or_target = targets.to(device) if targets is not None else None
                 counts = cell_counts.to(device) if cell_counts is not None else None
 
@@ -242,6 +267,7 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
 
     if optuna:
         train_cfg = train_cfg_for_optuna(trial, train_cfg)
+
 
     train_loader = DataLoader(train_dataset, batch_size=train_cfg['batch_size'], shuffle=True, collate_fn=collate_fn, num_workers=train_cfg['num_workers'], pin_memory=True if device == 'cuda' else False) # num_workers=train_cfg['num_workers']
     val_loader = DataLoader(val_dataset, batch_size=train_cfg['batch_size'], shuffle=False, collate_fn=collate_fn, num_workers=train_cfg['num_workers'], pin_memory=True if device == 'cuda' else False) # num_workers=train_cfg['num_workers'], 

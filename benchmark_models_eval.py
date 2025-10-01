@@ -27,15 +27,15 @@ from detectron2.structures import Instances
 from centermask2.centermask.config import get_cfg
 
 # ================== CONFIG ==================
-EVAL_MODEL = "centermask2"      # "lacss" or "cellpose" or "centermask2"
-TEST = False              # True => evaluate on test split, else val
+EVAL_MODEL = "lacss"      # "lacss" or "cellpose" or "centermask2"
+TEST = True              # True => evaluate on test split, else val
 
 # LACSS settings
 LACSS_ID_OR_PATH = os.path.join(BASE_DIR, "benchmark_models", "lacss3-small-l")
 LACSS_RESHAPE_TO = None
-LACSS_MIN_AREA = 0.0
-LACSS_SCORE_THR = 0.5
-LACSS_SEG_THR = 0.5
+LACSS_MIN_AREA = 1.0
+LACSS_SCORE_THR = 0.001
+LACSS_SEG_THR = 0.001
 
 # Cellpose settings
 CP_MODE = "grayscale"     # "grayscale" or "rgb"
@@ -68,10 +68,10 @@ def make_loader(test_split: bool):
     )
     split_name = 'test' if test_split else 'val'
     img_size = 224 if MODEL_NAME in ("ViT_Count", "ConvNeXt_Count") else 512
-    eval_name = EVAL_MODEL.lower()
-    normalize = False if eval_name in ("cellpose") else True
+    
+    
 
-    dataset = LiveCellDataset(dataset_dict[split_name], img_size=img_size, normalize=normalize)
+    dataset = LiveCellDataset(dataset_dict[split_name], img_size=img_size, normalize=False)
     loader = DataLoader(
         dataset,
         batch_size=32,
@@ -84,17 +84,80 @@ def make_loader(test_split: bool):
 
 
 # ================== IMAGE UTILS ==================
-def to_hw_or_hwc(img_t: torch.Tensor) -> np.ndarray:
+# def to_hw_or_hwc(img_t: torch.Tensor) -> np.ndarray:
+#     """
+#     Accepts [C,H,W] float tensor in [0,1] or [0,255]; returns (H,W) or (H,W,3) uint8.
+#     """
+#     eval_name = EVAL_MODEL.lower()
+#     normalize = False if eval_name in ("cellpose") else True
+
+#     x = img_t.detach().cpu().float()
+#     y=x.numpy()
+#     print("images[i] dtype/range:", y.dtype, np.min(y), np.max(y))
+#     if x.max() <= 1.0:
+#         x = x * 255.0
+#     x = x.clamp(0, 255)
+#     if x.shape[0] == 1:
+#         print("fuck why")
+#         return x[0].numpy().astype(np.uint8)            # grayscale
+#     return x.permute(1, 2, 0).numpy().astype(np.uint8)  # RGB
+
+
+def to_hw_or_hwc(img_t: torch.Tensor,
+                 to_float01: bool = False,
+                 ensure_3ch: bool | None = None,
+                 debug: bool = False) -> np.ndarray:
     """
-    Accepts [C,H,W] float tensor in [0,1] or [0,255]; returns (H,W) or (H,W,3) uint8.
+    Convert [C,H,W] tensor (values in [0,1] or [0,255]) to a NumPy image.
+
+    - If to_float01=True  -> returns float32 in [0,1]
+    - If to_float01=False -> returns uint8   in [0,255]
+
+    Output shape:
+      * (H,W)   if single-channel and ensure_3ch is False/None
+      * (H,W,3) if 3 channels, or if ensure_3ch=True (grayscale is repeated)
     """
-    x = img_t.detach().cpu().float()
-    if x.max() <= 1.0:
-        x = x * 255.0
-    x = x.clamp(0, 255)
-    if x.shape[0] == 1:
-        return x[0].numpy().astype(np.uint8)            # grayscale
-    return x.permute(1, 2, 0).numpy().astype(np.uint8)  # RGB
+    x = img_t.detach().cpu().to(torch.float32)          # [C,H,W] float32
+    C, H, W = x.shape
+
+    # --- scale to desired range ---
+    x_min, x_max = float(x.min()), float(x.max())
+
+    if to_float01:
+        # want [0,1]
+        if x_max > 1.0 + 1e-6:           # looks like [0,255]
+            x = x / 255.0
+        x = x.clamp_(0.0, 1.0)
+    else:
+        # want uint8 [0,255]
+        if x_max <= 1.0 + 1e-6:          # looks like [0,1]
+            x = x * 255.0
+        x = x.clamp_(0.0, 255.0)
+
+    # --- channel handling ---
+    if ensure_3ch:
+        if C == 1:
+            x = x.repeat(3, 1, 1)        # make 3-ch
+            C = 3
+        elif C > 3:
+            x = x[:3]                    # drop extras if any
+
+    if C == 1:
+        out = x[0]                        # (H,W)
+    else:
+        out = x[:3].permute(1, 2, 0)      # (H,W,3)
+
+    # --- dtype cast for output ---
+    if to_float01:
+        out_np = out.numpy().astype(np.float32)         # [0,1]
+    else:
+        out_np = out.numpy().astype(np.uint8)           # [0,255]
+
+    if debug:
+        mn, mx = float(out_np.min()), float(out_np.max())
+        print(f"[to_hw_or_hwc] shape={out_np.shape}, dtype={out_np.dtype}, range=({mn:.4f},{mx:.4f})")
+
+    return out_np
 
 
 def _to_cellpose_img_and_channels(img_t: torch.Tensor, mode: str):
@@ -323,7 +386,7 @@ def evaluate_centermask2(val_loader,
             images, gt_counts = batch
 
         for i in range(images.size(0)):
-            np_img = to_hw_or_hwc(images[i])     # uint8 (H,W) or (H,W,3)
+            np_img = to_hw_or_hwc(images[i], to_float01=True)     # uint8 (H,W) or (H,W,3)
             np_img = _rgb_to_bgr(np_img)         # D2 expects BGR
             outputs = predictor(np_img)
             inst: Instances = outputs["instances"].to("cpu")
@@ -385,7 +448,8 @@ def evaluate_lacss(val_loader,
                 images, gt_counts = batch
 
             for i in range(images.size(0)):
-                img_np = to_hw_or_hwc(images[i])
+                
+                img_np = to_hw_or_hwc(images[i], to_float01=False, ensure_3ch=True, debug=False)
                 pred = _predict_single(
                     predictor,
                     img_np,
@@ -395,6 +459,7 @@ def evaluate_lacss(val_loader,
                     score_threshold=score_threshold,
                     segmentation_threshold=segmentation_threshold,
                 )
+                
                 pred_count = lacss_count_from_pred(pred)
                 all_pred.append(int(pred_count))
                 all_gt.append(int(gt_counts[i].item()))
