@@ -85,7 +85,7 @@ train_cfg = {
         'result_dir': RESULT_DIR
     },
     'UNetDensity': {
-        'batch_size': 8,
+        'batch_size': 32,
         'num_workers': 8,
         'num_epochs': 20,
         'learning_rate': 3e-04,
@@ -129,5 +129,5 @@ train_cfg = {
 
 
 
-
+# Final model pathes for evaluation
 model_pathes = {'UNetDensity': '/home/meidanzehavi/Cell_counter/results/UNetDensity/UNetDensity_20250811-121939'}
