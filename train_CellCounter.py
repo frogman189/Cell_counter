@@ -9,6 +9,7 @@ import time
 import gc
 import numpy as np
 import cv2
+import copy
 
 from utils.logger_utils import setup_logging
 # Importing constants and utilities
@@ -18,7 +19,12 @@ from utils.metrics import calculate_counting_metrics, plot_training_results
 from utils.loss import select_loss
 
 
-DEBUG = False
+DEBUG = False  # Set to True to enable debug prints during training and validation
+
+def _clone_state_dict_to_cpu(sd: dict) -> dict:
+    # Freeze exact values now: detach → move to CPU → clone storage
+    return {k: (v.detach().cpu().clone() if torch.is_tensor(v) else copy.deepcopy(v))
+            for k, v in sd.items()}
 
 
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
@@ -91,18 +97,18 @@ def train_cfg_for_optuna(trial, train_cfg):
     Returns:
         dict: The updated training configuration dictionary.
     """
-    lr = trial.suggest_float("lr", 1e-5, 1e-4, log=True)  # log=True, will use log scale to interplolate between lr
+    lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)  # log=True, will use log scale to interplolate between lr
 
     # Mask_R_CNN_ResNet50: smaller batch sizes due to memory constraints
     if MODEL_NAME == 'Mask_R_CNN_ResNet50':
         batch_size = trial.suggest_categorical("batch_size", [2, 4, 8])
     else:
-        batch_size = trial.suggest_categorical("batch_size", [4, 8, 16, 32])
+        batch_size = trial.suggest_categorical("batch_size", [4, 8, 16])
 
     # Suggest weights for models using the custom Density+SSIM loss
     if MODEL_NAME in {'UNetDensity', 'DeepLabDensity', 'MicroCellUNet'}:
-        weight_density = trial.suggest_float("weight_density", 0.5, 2.0, step=0.1)
-        weight_ssim = trial.suggest_float("weight_ssim", 0.6, 2.0, step=0.1)
+        weight_density = trial.suggest_float("weight_density", 0.5, 4.0, step=0.1)
+        weight_ssim = trial.suggest_float("weight_ssim", 0.5, 4.0, step=0.1)
         train_cfg['w_density'] = weight_density
         train_cfg['w_ssim'] = weight_ssim
 
@@ -228,9 +234,11 @@ def validate_epoch(model, val_loader, criterion, device, *,
     all_pred_counts = []
     all_gt_counts = []
 
-    with torch.no_grad():
-        for images, targets, cell_counts in val_loader:
-            if MODEL_NAME == 'Mask_R_CNN_ResNet50':
+    
+    for images, targets, cell_counts in val_loader:
+        if MODEL_NAME == 'Mask_R_CNN_ResNet50':
+            model.eval()
+            with torch.no_grad():
                 # images: list[tensor], targets: list[dict], cell_counts: None
                 images = [img.to(device).float() for img in images]
                 targets = [
@@ -254,17 +262,20 @@ def validate_epoch(model, val_loader, criterion, device, *,
                 # GT counts come from the separate cell_counts tensor from the DataLoader
                 if counts is not None:
                     all_gt_counts.extend(counts.detach().cpu().numpy().tolist())
-                
-                # Validation loss calculation for Mask R-CNN (requires forward pass in train mode)
-                loss_dict = model(images, targets)      # torchvision returns dict of losses in train()
-                loss = sum(loss_dict.values())
 
-                # Note: Loss calculation here is slightly flawed as it uses a train-mode forward call
-                # outside of train_epoch, which is the original behavior.
-                total_loss += loss.item()
-                loss_batches += 1
+            # model.train() # switch back to train mode for loss calculation below    
+            # with torch.enable_grad():      # override outer no_grad for this block
+            #     # Validation loss calculation for Mask R-CNN (requires forward pass in train mode)
+            #     loss_dict = model(images, targets)      # torchvision returns dict of losses in train()
+            #     loss = sum(loss_dict.values())
 
-            elif MODEL_NAME == 'Unet':
+            # # Note: Loss calculation here is slightly flawed as it uses a train-mode forward call
+            # # outside of train_epoch, which is the original behavior.
+            # total_loss += loss.item()
+            # loss_batches += 1
+
+        elif MODEL_NAME == 'Unet':
+            with torch.no_grad():
                 # images: [B,3,H,W], targets: class map [B,H,W], cell_counts: None
                 images = images.to(device).float()
                 class_maps = targets.to(device).long()
@@ -293,7 +304,8 @@ def validate_epoch(model, val_loader, criterion, device, *,
                 if counts is not None:
                     all_gt_counts.extend(counts.detach().cpu().numpy().tolist())
 
-            else:
+        else:
+            with torch.no_grad():
                 # Density / count models
                 # images: [B,3,H,W], targets: density [B,1,H,W] (or dummy), cell_counts: [B] or None
                 images = images.to(device)
@@ -365,6 +377,7 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
     if optuna:
         # Update config with Optuna suggested parameters
         train_cfg = train_cfg_for_optuna(trial, train_cfg)
+        print("lr: ", train_cfg['learning_rate'])
 
     # Initialize DataLoaders
     train_loader = DataLoader(train_dataset, batch_size=train_cfg['batch_size'], shuffle=True, collate_fn=collate_fn, num_workers=train_cfg['num_workers'], pin_memory=True if device == 'cuda' else False) # num_workers=train_cfg['num_workers']
@@ -399,7 +412,9 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
     val_metrics_history = [] 
     best_val_loss = float('inf') # not used for checkpointing in this version
     best_val_accuracy = -1.0 # Tracks accuracy @ threshold 3 for best model selection
-    best_checkpoint = {}
+    # best_checkpoint = {}
+    best_epoch        = None
+    best_model_cpu    = None
     best_val_metrics = {}
 
     for epoch in range(epochs):
@@ -419,6 +434,8 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
         # Get current learning rate from optimizer
         lr = optimizer.param_groups[0]['lr']
         logger.warning(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {lr:.6f}")
+        if DEBUG and optuna:
+            print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {lr:.6f}") # debug
 
         # Print detailed metrics every 2 epochs
         if val_metrics and (epoch + 1) % 2 == 0:
@@ -430,21 +447,34 @@ def train(model, train_dataset, val_dataset, train_cfg, device=DEVICE, optuna=Fa
 
         # Checkpoint if validation accuracy @ threshold 3 improves
         if val_metrics[f'acc_thresh_3'] > best_val_accuracy:
+            # best_val_accuracy = val_metrics[f'acc_thresh_3']
+            # best_val_metrics = val_metrics
+            # # Save checkpoint
+            # best_checkpoint = {
+            #     'epoch': epoch + 1,
+            #     'model_state_dict': model.state_dict(),
+            #     'optimizer_state_dict': optimizer.state_dict(),
+            #     #'scheduler_state_dict': scheduler.state_dict(),
+            #     'train_loss': train_loss,
+            #     'val_loss': val_loss
+            # }
             best_val_accuracy = val_metrics[f'acc_thresh_3']
-            best_val_metrics = val_metrics
-            # Save checkpoint
-            best_checkpoint = {
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                #'scheduler_state_dict': scheduler.state_dict(),
-                'train_loss': train_loss,
-                'val_loss': val_loss
-            }
+            best_val_metrics  = copy.deepcopy(val_metrics)
+            best_epoch        = epoch + 1
+
+            best_model_cpu = _clone_state_dict_to_cpu(model.state_dict())
 
         logger.warning('Epoch complete in {:.0f}h {:.0f}m {:.0f}s'.format((time.time() - start_epoch) // 3600, ((time.time() - start_epoch) % 3600) // 60, (time.time() - start_epoch) % 60))
 
     if SAVE_MODEL and not optuna and RUN_EXP:
+        #save_model(best_checkpoint, train_cfg, output_dir)
+        best_checkpoint = {
+            "epoch": best_epoch,
+            "model_state_dict": best_model_cpu,
+            #"optimizer_state_dict": best_optim_cpu,  # or omit if you don't need resume-from-best
+            "train_cfg": copy.deepcopy(train_cfg),
+            "metrics": best_val_metrics,
+        }
         save_model(best_checkpoint, train_cfg, output_dir)
 
     time_elapsed = time.time() - since

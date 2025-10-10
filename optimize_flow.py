@@ -9,7 +9,7 @@ from models import get_model
 from preprocess import load_LiveCellDataSet
 
 
-NTRAILS = 50  # Number of hyperparameter trials
+NTRAILS = 100  # Number of hyperparameter trials
 STUDY_NAME = f"optimize_hyperparameters_{TIME}"
 
 def save_optuna_results(study, timestamp):
