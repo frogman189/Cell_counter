@@ -222,17 +222,3 @@ Our purpose-built counting models consistently beat the baselines on LIVECell. U
 
 ## 📜 Project Documentation
 The full project report, including the methodology, results, and conclusion, is available in the `report/` directory.
-
-
-
-
-
-
-
-
-
-
-
-
-
-

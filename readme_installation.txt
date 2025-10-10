@@ -18,7 +18,7 @@ Before running any scripts, complete the following steps:
         - Download the weights for the small-2dL model trained on the LIVECell dataset.
         - Place the weights file inside `Cell_counter/benchmark_models` as well.
     3. Clone CenterMask2
-    - Clone the CenterMask2 repository into our project directory: `git clone https://github.com/youngwanLEE/centermask2.git`
+        - Clone the CenterMask2 repository into our project directory: `git clone https://github.com/youngwanLEE/centermask2.git`
 
 ✅ After completing these steps, you will be ready to run the project scripts.
 💡 If anything in these instructions is unclear, please feel free to contact me.
