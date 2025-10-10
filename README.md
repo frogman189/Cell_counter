@@ -2,7 +2,7 @@
 ## <h2 align="center"> "Cell Counter" - A Deep Learning Analysis of cell counting in microscopic image </h2>
 
 ## Abstract
-In this project, we tackle image-level cell counting on the LIVECell dataset: given a single phase-contrast image, predict one number—the total cells. We benchmark three practical routes used in microscopy: (1) instance segmentation with Mask R-CNN (count high-confidence detections; anchors retuned for tiny, crowded cells), (2) density regression with a U-Net-style FCN (predict a non-negative density map and sum it), and (3) global regression with a ConvNeXt backbone (map the whole image directly to a non-negative count). All models share consistent preprocessing (ImageNet normalization, light flips/rotations) for a fair comparison.
+In this project, we tackle image-level cell counting on the LIVECell dataset: given a single phase-contrast image, predict one number—the total cells. We benchmark three practical routes used in microscopy: (1) instance segmentation with Mask R-CNN (count high-confidence detections; anchors retuned for tiny, crowded cells), (2) density regression with a DeepLabV3-ResNet101 (predict a non-negative density map and sum it), and (3) global regression with a ConvNeXt backbone (map the whole image directly to a non-negative count). All models share consistent preprocessing (ImageNet normalization, light flips/rotations) for a fair comparison.
 
 We evaluate with accuracy within ±k cells (k ∈ {0,1,3,5,10,20}) and standard MAE/MSE to reflect real lab tolerance. The study highlights where each approach shines: instance segmentation is interpretable (see misses vs. false positives), density maps are robust in confluent fields with ambiguous boundaries, and global regression is fast and simple when you only need the number.
 
@@ -136,7 +136,7 @@ python benchmark_models_eval.py
 We tuned training hyperparameters with **Optuna** to maximize the validation score returned by our training loop (`train()`), using a **TPESampler** over **100 trials** (`NTRAILS = 100`). The study name is timestamped (`optimize_hyperparameters_<TIME>`), and all artifacts (CSV of trials, contour plots, parameter importance, and `best_params.txt`) are saved under `OUTPUT_OPTUNA_DIR/optimization_run_<TIME>/`.
 
 The search covers general knobs (learning rate, batch size) and model-specific ones:
-- **UNetDensity**: density vs. SSIM loss weights.
+- **DeepLabDensity**: density vs. SSIM loss weights.
 - **ConvNeXt_Count**: Huber loss delta.
 We also compared optimizers (**SGD**, **Adam**, **RAdam**) and briefly tried a **cosine LR schedule with warmup**; empirically, **Adam** without the cosine schedule performed best for our final runs.
 
@@ -161,28 +161,28 @@ The objective was **maximized** and pruning/visualization utilities were enabled
 | Hyperparameter name | Range of search | Final value (best trial) |
 |---|---|---|
 | `model` | `{Mask-R-CNN ResNet50, Unet}` | *Mask-R-CNN ResNet50* |
-| `lr` | `[1e-5, 1e-3]` (log-uniform) | *(see `best_params.txt`)* |
-| `batch_size` | `{4, 8}` | *(see `best_params.txt`)* |
+| `lr` | `[1e-5, 1e-3]` (log-uniform) | *`4.82e-4`* |
+| `batch_size` | `{4, 8}` | *`4`* |
 
 
 **Density regression:**
 
 | Hyperparameter name | Range of search | Final value (best trial) |
 |---|---|---|
-| `model` | `{UNetDensity - FCN-ResNet50, DeepLabDensity - DeepLabv3-ResNet101 with ASPP, MicroCellUNet - SMP ResNet50 encoder + lightweight high-res branch with micro-attention}` | *UNetDensity* |
-| `lr` | `[1e-5, 1e-3]` (log-uniform) | *(see `best_params.txt`)* |
-| `batch_size` | `{4, 8, 16, 32}` | *(see `best_params.txt`)* |
-| `weight_density` | `[0.0, 1.2]` step `0.1` | *(see `best_params.txt`)* |
-| `weight_ssim` | `[0.0, 1.2]` step `0.1` | *(see `best_params.txt`)* |
+| `model` | `{UNetDensity - FCN-ResNet50, DeepLabDensity - DeepLabv3-ResNet101 with ASPP, MicroCellUNet - SMP ResNet50 encoder + lightweight high-res branch with micro-attention}` | *DeepLabDensity* |
+| `lr` | `[1e-5, 1e-3]` (log-uniform) | *`2.33e-5`* |
+| `batch_size` | `{4, 8, 16, 32}` | *`16`* |
+| `weight_density` | `[0.0, 2.0]` step `0.1` | *`1.6`* |
+| `weight_ssim` | `[0.0, 2.0]` step `0.1` | *`0.7`* |
 
 **Global regression → count directly:**
 
 | Hyperparameter name | Range of search | Final value (best trial) |
 |---|---|---|
 | `model` | `{ViT - ViT-B/16, ConvNeXt - ConvNeXt-Small, CNNTransformerCounter - ResNet50 (C5) → 1×1 conv (to 768) → 14×14 tokens + CLS → ViT encoder → mean pool → MLP → ReLU}` | *ConvNeXt* |
-| `lr` | `[1e-5, 1e-3]` (log-uniform) | *(see `best_params.txt`)* |
-| `batch_size` | `{4, 8, 16, 32}` | *(see `best_params.txt`)* |
-| `huber_delta` | `[0.0, 10.0]` step `0.5` | *(see `best_params.txt`)* |
+| `lr` | `[1e-5, 1e-3]` (log-uniform) | *`2.38e-5`* |
+| `batch_size` | `{4, 8, 16, 32}` | *`16`* |
+| `huber_delta` | `[0.0, 10.0]` step `0.5` | *`3.0`* |
 
 
 ## Training Results
@@ -194,23 +194,23 @@ The objective was **maximized** and pruning/visualization utilities were enabled
 
 | Model | ±0 | ±1 | ±3 | ±5 | ±10 | ±20 |
 |---|---:|---:|---:|---:|---:|---:|
-| Mask R-CNN (ours)          | -- | -- | -- | -- | -- | -- |
-| UNetDensity (ours)         | -- | -- | -- | -- | -- | -- |
-| ConvNeXt regression (ours) | -- | -- | -- | -- | -- | -- |
+| Mask R-CNN (ours)          | 1.1 | 5.0 | 11.2 | 15.0 | 21.9 | 28.2 |
+| DeepLabDensity (ours)      | 1.3 | 4.6 | 10.9 | 16.3 | 30.3 | 51.5 |
+| ConvNeXt regression (ours) | 1.7 | 6.0 | 12.7 | 17.7 | 31.9 | 55.6 |
 | Cellpose (LIVECell-tuned)  | 0.26 | 0.46 | 1.12 | 2.84 | 7.94 | 21.56 |
-| LACSS (LIVECell)           | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.46 |
-| CenterMask2 (LIVECell)     | 0.33 | 0.99 | 1.98 | 3.57 | 5.89 | 11.7 |
+| LACSS (LIVECell)           | 0.00 | 0.00 | 0.13 | 0.13 | 0.13 | 0.13 |
+| CenterMask2 (LIVECell)     | 0.60 | 1.06 | 2.12 | 3.44 | 6.02 | 12.04 |
 
 **LIVECell test-set error metrics**
 
 | Model | MSE | RMSE | MAE | Mean count (Pred / GT) |
 |---|---:|---:|---:|---|
-| Mask R-CNN (ours)          | -- | -- | -- | -- / 300.02 |
-| UNetDensity (ours)         | -- | -- | -- | -- / 300.02 |
-| ConvNeXt regression (ours) | -- | -- | -- | -- / 300.02 |
+| Mask R-CNN (ours)          | 135575.47 | 368.21 | 210.37 | 90.78 / 300.02 |
+| DeepLabDensity (ours)      | 14038.72  | 118.49 | 54.74  | 269.55 / 300.02 |
+| ConvNeXt regression (ours) | 15064.22  | 122.736 | 53.11  | 268.32 / 300.02 |
 | Cellpose (LIVECell-tuned)  | 121477.39 | 348.54 | 188.92 | 111.56 / 300.02 |
-| LACSS (LIVECell)           | 163162.12 | 403.93 | 269.31 | 30.75 / 300.02 |
-| CenterMask2 (LIVECell)     | 119022.62 | 344.02 | 198.35 | 148.46 / 300.02 |
+| LACSS (LIVECell)           | 180647.02 | 425.03 | 292.11 | 7.91 / 300.02 |
+| CenterMask2 (LIVECell)     | 119104.81 | 345.12 | 198.34 | 147.86 / 300.02 |
 
 
 
