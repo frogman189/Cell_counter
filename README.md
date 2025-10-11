@@ -207,7 +207,7 @@ The objective was **maximized** and pruning/visualization utilities were enabled
 |---|---:|---:|---:|---|
 | Mask R-CNN (ours)          | 135575.47 | 368.21 | 210.37 | 90.78 / 300.02 |
 | DeepLabDensity (ours)      | 14038.72  | 118.49 | 54.74  | 269.55 / 300.02 |
-| ConvNeXt regression (ours) | 15064.22  | 122.736 | 53.11  | 268.32 / 300.02 |
+| ConvNeXt regression (ours) | 10133.08  | 100.66 | 47.09  | 280.40 / 300.02 |
 | Cellpose (LIVECell-tuned)  | 121477.39 | 348.54 | 188.92 | 111.56 / 300.02 |
 | LACSS (LIVECell)           | 180647.02 | 425.03 | 292.11 | 7.91 / 300.02 |
 | CenterMask2 (LIVECell)     | 119104.81 | 345.12 | 198.34 | 147.86 / 300.02 |
