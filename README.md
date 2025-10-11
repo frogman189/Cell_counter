@@ -80,7 +80,7 @@ After installing the environment (see **Installation Instructions**) and prepari
 ---
 
 ### 1) Use our pretrained checkpoints (recommended to start)
-- Download checkpoints from **Google Drive** (link TBD).
+- Download checkpoints from [Google Drive](https://drive.google.com/drive/folders/1-wyJC4JeiDCDBcT340GKAE2rwOmK8loh?usp=sharing).
 - Unzip and place them under ./results/
 - in `utils/constants.py`, set the model you want to evaluate::
 ```python
